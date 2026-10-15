@@ -1,0 +1,106 @@
+name: Build Windows
+
+# Builds EVE-APM Preview (with the selection-fx patch if selection-fx.patch is
+# in the repo root) on a GitHub Windows machine and publishes the result as a
+# downloadable artifact. Run it manually from the Actions tab, or push to master.
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      # Keep line endings exactly as committed so the patch context matches.
+      - name: Disable git CRLF conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v6
+
+      - name: Apply selection-fx patch
+        shell: pwsh
+        run: |
+          if (-not (Test-Path selection-fx.patch)) {
+            Write-Host "No selection-fx.patch in the repo root; building the project unmodified."
+            exit 0
+          }
+          git apply --reverse --check --ignore-whitespace selection-fx.patch *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Patch is already applied."
+            exit 0
+          }
+          git apply --ignore-whitespace selection-fx.patch
+          if ($LASTEXITCODE -ne 0) { throw "selection-fx.patch did not apply cleanly to this repo." }
+          Write-Host "Patch applied."
+
+      # The patch adds 3 .cpp and 3 .h files. If CMakeLists.txt lists sources by
+      # name (rather than globbing), register them so they get compiled and moc'd.
+      - name: Register new source files with CMake if needed
+        shell: pwsh
+        run: |
+          if (-not (Test-Path src/selectionfx.cpp)) { Write-Host "Patch not present; nothing to register."; exit 0 }
+          $f = "CMakeLists.txt"
+          $txt = Get-Content $f -Raw
+          if ($txt -match "selectionfx") { Write-Host "CMakeLists.txt already lists the new files."; exit 0 }
+          if ($txt -match "(?i)file\s*\(\s*GLOB") { Write-Host "CMakeLists.txt uses GLOB; new files are picked up automatically."; exit 0 }
+          if ($txt -notmatch "(?i)add_executable\s*\(\s*([^\s\)]+)") {
+            throw "Could not find add_executable() in CMakeLists.txt. Add the 6 new files to it by hand."
+          }
+          $target = $Matches[1]
+          Add-Content $f "`ntarget_sources($target PRIVATE`n  src/selectionfx.cpp src/selectionfxpage.cpp src/voiceplayer.cpp`n  include/selectionfx.h include/selectionfxpage.h include/voiceplayer.h)"
+          Write-Host "Registered new files on target $target"
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtmultimedia
+          cache: true
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64 "-DCMAKE_PREFIX_PATH=$env:QT_ROOT_DIR" 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --parallel 2>&1 | Tee-Object -FilePath build.log -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # If configure/build fails, show just the error lines on the run's summary
+      # page (the page you land on after clicking the run) so they are easy to copy.
+      - name: Show build errors
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path build.log) {
+            $fence = '```'
+            $errors = Select-String -Path build.log -Pattern 'error|CMake Error|fatal' |
+                      Select-Object -First 40 | ForEach-Object { $_.Line.Trim() }
+            $text = "### Build errors (first 40 lines)`n$fence`n" + ($errors -join "`n") + "`n$fence"
+            $text | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+
+      - name: Collect exe and Qt DLLs
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem build -Recurse -Filter *.exe |
+                 Where-Object { $_.FullName -match "\\Release\\" -and $_.FullName -notmatch "CMakeFiles" } |
+                 Select-Object -First 1
+          if (-not $exe) { throw "No Release .exe found under build/" }
+          Write-Host "Built: $($exe.FullName)"
+          New-Item -ItemType Directory -Force dist/EVE-APM-Preview | Out-Null
+          Copy-Item $exe.FullName dist/EVE-APM-Preview/
+          windeployqt --release --no-translations "dist/EVE-APM-Preview/$($exe.Name)"
+
+      - name: Upload build
+        uses: actions/upload-artifact@v6
+        with:
+          name: EVE-APM-Preview-windows
+          path: dist/EVE-APM-Preview

@@ -1,0 +1,2273 @@
+diff -ruN a/include/config.h b2/include/config.h
+--- a/include/config.h	2026-10-15 14:26:00.210952909 +0000
++++ b2/include/config.h	2026-10-15 17:14:31.219787462 +0000
+@@ -12,6 +12,7 @@
+ #include <QSettings>
+ #include <QString>
+ #include <QStringList>
++#include <QVariant>
+ #include <QVector>
+ #include <memory>
+ 
+@@ -311,6 +312,15 @@
+ 
+   void save();
+ 
++  /// Generic access to values in the active profile, for feature modules that
++  /// keep their own keys (e.g. selection feedback).
++  QVariant customValue(const QString &key,
++                       const QVariant &defaultValue = QVariant()) const;
++  void setCustomValue(const QString &key, const QVariant &value);
++  /// Removes the key and everything stored under it.
++  void removeCustomKey(const QString &key);
++  QStringList customChildGroups(const QString &group) const;
++
+   QStringList listProfiles() const;
+   QString getCurrentProfileName() const;
+   bool loadProfile(const QString &profileName);
+diff -ruN a/include/configdialog.h b2/include/configdialog.h
+--- a/include/configdialog.h	2026-10-15 14:26:00.212099047 +0000
++++ b2/include/configdialog.h	2026-10-15 17:15:14.048059814 +0000
+@@ -25,6 +25,7 @@
+ class ThumbnailWidget;
+ class QNetworkAccessManager;
+ class QScrollArea;
++class SelectionFxPage;
+ 
+ class ConfigDialog : public QDialog {
+   Q_OBJECT
+@@ -107,6 +108,7 @@
+   void createAppearancePage();
+   void createHotkeysPage();
+   void createBehaviorPage();
++  void createSelectionFeedbackPage();
+   void createNonEVEThumbnailsPage();
+   void createPerformancePage();
+   void createDataSourcesPage();
+@@ -187,6 +189,7 @@
+ 
+   QListWidget *m_categoryList;
+   QStackedWidget *m_stackedWidget;
++  SelectionFxPage *m_selectionFxPage = nullptr;
+   QPushButton *m_okButton;
+   QPushButton *m_cancelButton;
+   QPushButton *m_applyButton;
+diff -ruN a/include/mainwindow.h b2/include/mainwindow.h
+--- a/include/mainwindow.h	2026-10-15 14:26:00.218543856 +0000
++++ b2/include/mainwindow.h	2026-10-15 17:15:14.044650787 +0000
+@@ -20,6 +20,7 @@
+ class ConfigDialog;
+ class ChatLogReader;
+ class ProtocolHandler;
++class VoicePlayer;
+ struct CycleGroup;
+ 
+ /// Pre-computed shared state for bulk thumbnail visibility updates
+@@ -93,6 +94,7 @@
+   std::unique_ptr<HotkeyManager> hotkeyManager;
+   std::unique_ptr<ChatLogReader> m_chatLogReader;
+   std::unique_ptr<QSoundEffect> m_soundEffect;
++  std::unique_ptr<VoicePlayer> m_voicePlayer;
+   std::unique_ptr<ProtocolHandler> m_protocolHandler;
+   std::unique_ptr<QLocalServer> m_ipcServer;
+   QHash<HWND, ThumbnailWidget *> thumbnails;
+@@ -178,6 +180,8 @@
+   void updateAllCycleIndices(HWND hwnd);
+   void updateCharacterHotkeyCycleIndices(HWND hwnd);
+   void activateWindow(HWND hwnd);
++  void playSelectionFeedback(HWND hwnd, bool wasAlreadyForeground);
++  VoicePlayer *ensureVoicePlayer();
+   void activateCharacter(const QString &characterName);
+   void updateCharacterMappings();
+   void updateSnappingLists();
+diff -ruN a/include/selectionfx.h b2/include/selectionfx.h
+--- a/include/selectionfx.h	1970-01-01 00:00:00.000000000 +0000
++++ b2/include/selectionfx.h	2026-10-15 17:30:27.754625894 +0000
+@@ -0,0 +1,77 @@
++#ifndef SELECTIONFX_H
++#define SELECTIONFX_H
++
++#include "overlayinfo.h"
++#include <QRectF>
++#include <QSizeF>
++#include <QString>
++#include <QStringList>
++
++/// RTS-style "unit selected" feedback: an image or GIF shown on a client's
++/// thumbnail (animated when the client is selected) plus an audio clip.
++///
++/// Everything is configured in Settings -> Selection Feedback. Settings are
++/// stored in the active profile; media files live in one folder chosen by the
++/// user ("media folder").
++namespace SelectionFx {
++
++/// Global options (same for every character).
++struct Settings {
++  QString mediaFolder;
++  bool imageEnabled = true;
++  int sizePercent = 35; ///< image fits within this % of the preview window
++  int position = static_cast<int>(OverlayPosition::BottomLeft);
++  bool animationEnabled = true; ///< pop/fade-in animation on select
++  bool audioEnabled = true;
++  int volume = 70; ///< 0-100
++  bool onlyOnChange = true; ///< ignore re-selecting the active client
++
++  static Settings load();
++  void save() const;
++};
++
++/// Per-character media. File names are relative to the media folder (an
++/// absolute path is also accepted).
++struct CharacterMedia {
++  QString image;
++  QString audio;
++  int sizePercent = 0; ///< 0 = use Settings::sizePercent
++
++  bool isEmpty() const {
++    return image.isEmpty() && audio.isEmpty() && sizePercent <= 0;
++  }
++};
++
++QString defaultMediaFolder();
++
++CharacterMedia characterMedia(const QString &characterName);
++void setCharacterMedia(const QString &characterName,
++                       const CharacterMedia &media);
++void removeCharacterMedia(const QString &characterName);
++QStringList configuredCharacters();
++
++QStringList imageNameFilters(); ///< e.g. "*.png", "*.gif"
++QStringList audioNameFilters();
++bool isImageFile(const QString &fileName);
++bool isAudioFile(const QString &fileName);
++
++/// File names (not paths) in `folder` that match the filters, sorted.
++QStringList listMediaFiles(const QString &folder, const QStringList &filters);
++
++/// Turns a stored file name into a full path (absolute paths pass through).
++QString resolveMediaPath(const QString &folder, const QString &fileOrPath);
++
++/// Makes sure `sourcePath` is inside `folder`, copying it there if needed.
++/// Returns the file name to store, or an empty string on failure.
++QString importIntoFolder(const QString &folder, const QString &sourcePath);
++
++/// Where an image of `imageSize` is drawn inside a preview window of size
++/// `container`: scaled (aspect ratio kept) to fit within `sizePercent` of the
++/// container's width and height, anchored on the same 3x3 grid as the text
++/// overlays. Used by both the real thumbnails and the settings preview.
++QRectF imageRect(const QSizeF &container, const QSizeF &imageSize,
++                 int sizePercent, OverlayPosition position, qreal margin);
++
++} // namespace SelectionFx
++
++#endif // SELECTIONFX_H
+diff -ruN a/include/selectionfxpage.h b2/include/selectionfxpage.h
+--- a/include/selectionfxpage.h	1970-01-01 00:00:00.000000000 +0000
++++ b2/include/selectionfxpage.h	2026-10-15 17:13:48.554115944 +0000
+@@ -0,0 +1,131 @@
++#ifndef SELECTIONFXPAGE_H
++#define SELECTIONFXPAGE_H
++
++#include "overlayinfo.h"
++#include "selectionfx.h"
++#include <QDateTime>
++#include <QList>
++#include <QPixmap>
++#include <QString>
++#include <QStringList>
++#include <QWidget>
++#include <functional>
++
++class QAudioOutput;
++class QCheckBox;
++class QComboBox;
++class QDragEnterEvent;
++class QDropEvent;
++class QLabel;
++class QLineEdit;
++class QMediaPlayer;
++class QMouseEvent;
++class QMovie;
++class QPushButton;
++class QShowEvent;
++class QHideEvent;
++class QSlider;
++class QSpinBox;
++class QVBoxLayout;
++
++/// Mock "preview window" that shows where the selected character's image will
++/// sit and how large it will be, using the same layout maths as the real
++/// thumbnails. Animated GIFs play here.
++class MediaPreviewBox : public QWidget {
++public:
++  explicit MediaPreviewBox(QWidget *parent = nullptr);
++
++  void setMedia(const QString &path);
++  void setLayoutOptions(int sizePercent, OverlayPosition position);
++
++protected:
++  void paintEvent(QPaintEvent *event) override;
++  void showEvent(QShowEvent *event) override;
++  void hideEvent(QHideEvent *event) override;
++
++private:
++  QString m_path;
++  QDateTime m_stamp;
++  QPixmap m_idle;
++  QMovie *m_movie = nullptr;
++  int m_sizePercent = 35;
++  OverlayPosition m_position = OverlayPosition::BottomLeft;
++};
++
++/// One character's row in the list: name, image, audio and size override.
++/// Files dragged from Explorer onto the row are handed to `onFilesDropped`.
++class MediaRow : public QWidget {
++public:
++  MediaRow();
++
++  QLineEdit *nameEdit = nullptr;
++  QLabel *thumb = nullptr;
++  QComboBox *imageCombo = nullptr;
++  QPushButton *imageBrowse = nullptr;
++  QComboBox *audioCombo = nullptr;
++  QPushButton *audioBrowse = nullptr;
++  QPushButton *audioPlay = nullptr;
++  QSpinBox *sizeSpin = nullptr;
++  QPushButton *deleteButton = nullptr;
++
++  std::function<void(const QStringList &)> onFilesDropped;
++  std::function<void()> onClicked;
++
++  void setSelectedLook(bool selected);
++
++protected:
++  void dragEnterEvent(QDragEnterEvent *event) override;
++  void dropEvent(QDropEvent *event) override;
++  void mousePressEvent(QMouseEvent *event) override;
++};
++
++/// The "Selection Feedback" page of the settings window.
++class SelectionFxPage : public QWidget {
++public:
++  explicit SelectionFxPage(QWidget *parent = nullptr);
++
++  void loadFromConfig();
++  void saveToConfig();
++
++private:
++  QString mediaFolder() const;
++  MediaRow *addRow(const QString &name, const SelectionFx::CharacterMedia &media);
++  void removeRow(MediaRow *row);
++  void clearRows();
++  void selectRow(MediaRow *row);
++  void populateCombo(QComboBox *combo, const QStringList &filters,
++                     const QString &current);
++  void refreshFileLists();
++  void updateRowThumb(MediaRow *row);
++  void updatePreview();
++  void updateAspect();
++  void browseForFolder();
++  void browseForFile(MediaRow *row, bool image);
++  void importAndSelect(MediaRow *row, bool image, const QString &sourcePath);
++  void handleDrop(MediaRow *row, const QStringList &files);
++  void addFromOpenWindows();
++  void playTest(MediaRow *row);
++
++  QLineEdit *m_folderEdit = nullptr;
++  QCheckBox *m_onlyOnChangeCheck = nullptr;
++  QCheckBox *m_imageCheck = nullptr;
++  QSlider *m_sizeSlider = nullptr;
++  QLabel *m_sizeValue = nullptr;
++  QComboBox *m_positionCombo = nullptr;
++  QCheckBox *m_animateCheck = nullptr;
++  QCheckBox *m_audioCheck = nullptr;
++  QSlider *m_volumeSlider = nullptr;
++  QLabel *m_volumeValue = nullptr;
++  MediaPreviewBox *m_preview = nullptr;
++  QLabel *m_previewCaption = nullptr;
++
++  QWidget *m_rowsContainer = nullptr;
++  QVBoxLayout *m_rowsLayout = nullptr;
++  QList<MediaRow *> m_rows;
++  MediaRow *m_selectedRow = nullptr;
++
++  QMediaPlayer *m_testPlayer = nullptr;
++  QAudioOutput *m_testOutput = nullptr;
++};
++
++#endif // SELECTIONFXPAGE_H
+diff -ruN a/include/thumbnailwidget.h b2/include/thumbnailwidget.h
+--- a/include/thumbnailwidget.h	2026-10-15 14:26:00.223868396 +0000
++++ b2/include/thumbnailwidget.h	2026-10-15 17:14:31.222699985 +0000
+@@ -14,6 +14,8 @@
+ #include <windows.h>
+ 
+ class OverlayWidget;
++class QMovie;
++class QVariantAnimation;
+ 
+ /// Represents a single combat event with its own lifecycle
+ struct CombatEvent {
+@@ -58,6 +60,14 @@
+   QString getCombatEventType() const;
+   QStringList getActiveCombatEventTypes() const;
+ 
++  /// Re-reads this character's image/GIF from the settings and passes it to
++  /// the overlay. Called from updateOverlays().
++  void refreshMedia();
++  /// Plays the "selected" animation (and starts a GIF).
++  void playSelectEffect();
++  /// Marks the character as speaking while its audio clip plays.
++  void setSpeaking(bool speaking);
++
+   void forceUpdate();
+   void updateWindowFlags(bool alwaysOnTop);
+   void forceOverlayRender();
+@@ -143,8 +153,16 @@
+   void pauseAnimations();
+   void resumeAnimations();
+ 
++  // Selection feedback: image / GIF shown on the preview
++  void setMedia(const QString &path);
++  void clearMedia() { setMedia(QString()); }
++  void setMediaStyle(OverlayPosition position, int sizePercent, bool animate);
++  void playSelectAnimation();
++  void setSpeaking(bool speaking);
++
+ protected:
+   void paintEvent(QPaintEvent *event) override;
++  void hideEvent(QHideEvent *event) override;
+ 
+ private:
+   QVector<OverlayElement> m_overlays;
+@@ -161,6 +179,26 @@
+   qreal m_animationPhase = 0.0;
+   bool m_animationsPaused = false;
+ 
++  QString m_mediaPath;
++  QDateTime m_mediaStamp;
++  QPixmap m_mediaIdle;       // still image, or the first frame of a GIF
++  QPixmap m_mediaIdleScaled; // m_mediaIdle scaled for the current layout
++  QSize m_mediaIdleScaledPx;
++  QMovie *m_movie = nullptr; // only for animated images
++  QTimer *m_mediaHoldTimer = nullptr;
++  OverlayPosition m_mediaPosition = OverlayPosition::BottomLeft;
++  int m_mediaSizePercent = 35;
++  bool m_mediaAnimate = true;
++  QVariantAnimation *m_selectAnimation = nullptr;
++  QVariantAnimation *m_speakAnimation = nullptr;
++  QTimer *m_speakGuardTimer = nullptr;
++  qreal m_selectProgress = 1.0; // 0 = just selected, 1 = idle
++  qreal m_speakPhase = 0.0;
++  bool m_speaking = false;
++  void drawMedia(QPainter &painter);
++  void beginMediaPlayback(int holdMs);
++  void maybeStopMovie();
++
+   void drawOverlays(QPainter &painter);
+   void renderOverlaysToCache();
+   void drawBorderWithStyle(QPainter &painter, const QRectF &rect,
+diff -ruN a/include/voiceplayer.h b2/include/voiceplayer.h
+--- a/include/voiceplayer.h	1970-01-01 00:00:00.000000000 +0000
++++ b2/include/voiceplayer.h	2026-10-15 17:30:27.756085931 +0000
+@@ -0,0 +1,57 @@
++#ifndef VOICEPLAYER_H
++#define VOICEPLAYER_H
++
++#include <QHash>
++#include <QObject>
++#include <QString>
++
++class QAudioOutput;
++class QMediaPlayer;
++
++/// Plays the audio clip assigned to a character when its client is selected.
++///
++/// The clip comes from Settings -> Selection Feedback (a file in the user's
++/// media folder; WAV, MP3, OGG, FLAC or M4A). A new clip interrupts the
++/// previous one, like an RTS unit acknowledgement.
++class VoicePlayer : public QObject {
++  Q_OBJECT
++
++public:
++  explicit VoicePlayer(QObject *parent = nullptr);
++  ~VoicePlayer() override;
++
++  /// Starts the character's clip, cutting off whatever is playing. There is no
++  /// cooldown: the newest selection always wins. Returns false if nothing was
++  /// played (no clip assigned, file missing, ...).
++  bool play(const QString &characterName);
++  void stop();
++
++  /// Re-reads settings and preloads the configured clips. Call after the
++  /// settings change.
++  void reload();
++
++signals:
++  /// Emitted when a clip starts or stops, so the UI can animate the speaking
++  /// character's image.
++  void speakingChanged(const QString &characterName, bool speaking);
++
++private:
++  struct Voice {
++    QMediaPlayer *player = nullptr;
++    QAudioOutput *output = nullptr;
++    QString owner; // character the clip was last started for
++  };
++
++  static constexpr int MAX_VOICES = 48;
++
++  Voice *voiceFor(const QString &file);
++  void clearVoices();
++
++  QString m_mediaFolder;
++  int m_volume = 70;
++
++  QHash<QString, Voice *> m_voices; // file path -> voice
++  Voice *m_current = nullptr;
++};
++
++#endif // VOICEPLAYER_H
+diff -ruN a/src/config.cpp b2/src/config.cpp
+--- a/src/config.cpp	2026-10-15 14:26:00.173886645 +0000
++++ b2/src/config.cpp	2026-10-15 17:14:31.221222856 +0000
+@@ -1171,6 +1171,24 @@
+ 
+ void Config::save() { m_settings->sync(); }
+ 
++QVariant Config::customValue(const QString &key,
++                             const QVariant &defaultValue) const {
++  return m_settings->value(key, defaultValue);
++}
++
++void Config::setCustomValue(const QString &key, const QVariant &value) {
++  m_settings->setValue(key, value);
++}
++
++void Config::removeCustomKey(const QString &key) { m_settings->remove(key); }
++
++QStringList Config::customChildGroups(const QString &group) const {
++  m_settings->beginGroup(group);
++  const QStringList groups = m_settings->childGroups();
++  m_settings->endGroup();
++  return groups;
++}
++
+ QString Config::getProfilesDirectory() const {
+   QString exePath = QCoreApplication::applicationDirPath();
+   return exePath + "/profiles";
+diff -ruN a/src/configdialog.cpp b2/src/configdialog.cpp
+--- a/src/configdialog.cpp	2026-10-15 14:26:00.179621192 +0000
++++ b2/src/configdialog.cpp	2026-10-15 17:15:14.060137287 +0000
+@@ -2,6 +2,7 @@
+ #include "config.h"
+ #include "hotkeycapture.h"
+ #include "hotkeymanager.h"
++#include "selectionfxpage.h"
+ #include "stylesheet.h"
+ #include "systemcolorsdialog.h"
+ #include "thumbnailwidget.h"
+@@ -141,6 +142,7 @@
+   createAppearancePage();
+   createHotkeysPage();
+   createBehaviorPage();
++  createSelectionFeedbackPage();
+   createNonEVEThumbnailsPage();
+   createDataSourcesPage();
+   createLegacySettingsPage();
+@@ -207,6 +209,7 @@
+   m_categoryList->addItem("Appearance");
+   m_categoryList->addItem("Hotkeys");
+   m_categoryList->addItem("Behavior");
++  m_categoryList->addItem("Selection Feedback");
+   m_categoryList->addItem("Non-EVE Thumbnails");
+   m_categoryList->addItem("Logs");
+   m_categoryList->addItem("Legacy Settings");
+@@ -2354,6 +2357,20 @@
+   m_stackedWidget->addWidget(page);
+ }
+ 
++void ConfigDialog::createSelectionFeedbackPage() {
++  QScrollArea *scrollArea = new QScrollArea();
++  scrollArea->setWidgetResizable(true);
++  scrollArea->setFrameShape(QFrame::NoFrame);
++  scrollArea->setStyleSheet(StyleSheet::getScrollAreaStyleSheet());
++  scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
++  scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++
++  m_selectionFxPage = new SelectionFxPage();
++  scrollArea->setWidget(m_selectionFxPage);
++
++  m_stackedWidget->addWidget(scrollArea);
++}
++
+ void ConfigDialog::createPerformancePage() {}
+ 
+ void ConfigDialog::createNonEVEThumbnailsPage() {
+@@ -4272,6 +4289,10 @@
+ 
+   m_bindingManager.loadAll();
+ 
++  if (m_selectionFxPage) {
++    m_selectionFxPage->loadFromConfig();
++  }
++
+   HotkeyManager *hotkeyMgr = HotkeyManager::instance();
+   if (hotkeyMgr) {
+     QVector<HotkeyBinding> suspendBindings = hotkeyMgr->getSuspendHotkeys();
+@@ -5454,6 +5475,10 @@
+   }
+   config.setProcessNames(processNames);
+ 
++  if (m_selectionFxPage) {
++    m_selectionFxPage->saveToConfig();
++  }
++
+   Config::instance().save();
+ }
+ 
+diff -ruN a/src/mainwindow.cpp b2/src/mainwindow.cpp
+--- a/src/mainwindow.cpp	2026-10-15 14:26:00.193385016 +0000
++++ b2/src/mainwindow.cpp	2026-10-15 17:15:14.046780327 +0000
+@@ -5,7 +5,9 @@
+ #include "hotkeymanager.h"
+ #include "overlayinfo.h"
+ #include "protocolhandler.h"
++#include "selectionfx.h"
+ #include "thumbnailwidget.h"
++#include "voiceplayer.h"
+ #include "windowcapture.h"
+ #include <QAction>
+ #include <QCoreApplication>
+@@ -1865,10 +1867,14 @@
+ 
+   // Check if window needs restoration for refresh tracking
+   bool wasMinimized = IsIconic(hwnd);
++  const bool wasAlreadyForeground = (GetForegroundWindow() == hwnd);
+ 
+   // Use WindowCapture's activation logic (handles all window states properly)
+   WindowCapture::activateWindow(hwnd);
+ 
++  // RTS-style feedback: image animation + audio clip
++  playSelectionFeedback(hwnd, wasAlreadyForeground);
++
+   // Track restored window for thumbnail refresh
+   if (wasMinimized) {
+     m_hwndPendingRefresh = hwnd;
+@@ -1893,6 +1899,50 @@
+   QTimer::singleShot(100, this, &MainWindow::ensureThumbnailsOnTop);
+ }
+ 
++VoicePlayer *MainWindow::ensureVoicePlayer() {
++  if (!m_voicePlayer) {
++    m_voicePlayer = std::make_unique<VoicePlayer>();
++    connect(m_voicePlayer.get(), &VoicePlayer::speakingChanged, this,
++            [this](const QString &name, bool speaking) {
++              for (ThumbnailWidget *t : std::as_const(thumbnails)) {
++                if (t && t->getCharacterName() == name) {
++                  t->setSpeaking(speaking);
++                  break;
++                }
++              }
++            });
++  }
++  return m_voicePlayer.get();
++}
++
++void MainWindow::playSelectionFeedback(HWND hwnd, bool wasAlreadyForeground) {
++  auto it = thumbnails.constFind(hwnd);
++  if (it == thumbnails.constEnd() || !it.value()) {
++    return;
++  }
++
++  ThumbnailWidget *thumb = it.value();
++  const QString characterName = thumb->getCharacterName();
++  if (characterName.isEmpty()) {
++    return; // not-logged-in clients and non-EVE windows have no character
++  }
++
++  const SelectionFx::Settings fx = SelectionFx::Settings::load();
++  if (fx.onlyOnChange && wasAlreadyForeground) {
++    return;
++  }
++
++  // The active client's thumbnail is hidden when "Hide Active Thumbnail" is
++  // on, so there is nothing to animate then (audio still plays).
++  if (!Config::instance().hideActiveClientThumbnail()) {
++    thumb->playSelectEffect();
++  }
++
++  if (fx.audioEnabled) {
++    ensureVoicePlayer()->play(characterName);
++  }
++}
++
+ void MainWindow::minimizeInactiveWindows() {
+   const Config &cfg = Config::instance();
+   for (auto it = thumbnails.begin(); it != thumbnails.end(); ++it) {
+@@ -2192,6 +2242,10 @@
+ 
+   hotkeyManager->loadFromConfig();
+ 
++  if (m_voicePlayer) {
++    m_voicePlayer->reload();
++  }
++
+   if (!cfg.minimizeInactiveClients()) {
+     for (auto it = thumbnails.begin(); it != thumbnails.end(); ++it) {
+       HWND hwnd = it.key();
+diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
+--- a/src/selectionfx.cpp	1970-01-01 00:00:00.000000000 +0000
++++ b2/src/selectionfx.cpp	2026-10-15 17:30:27.755352169 +0000
+@@ -0,0 +1,231 @@
++#include "selectionfx.h"
++#include "config.h"
++#include <QCoreApplication>
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QSet>
++#include <QtGlobal>
++
++namespace SelectionFx {
++
++namespace {
++constexpr const char *KEY_MEDIA_FOLDER = "selectionFx/mediaFolder";
++constexpr const char *KEY_IMAGE_ENABLED = "selectionFx/imageEnabled";
++constexpr const char *KEY_SIZE_PERCENT = "selectionFx/sizePercent";
++constexpr const char *KEY_POSITION = "selectionFx/position";
++constexpr const char *KEY_ANIMATION = "selectionFx/animationEnabled";
++constexpr const char *KEY_AUDIO_ENABLED = "selectionFx/audioEnabled";
++constexpr const char *KEY_VOLUME = "selectionFx/volume";
++constexpr const char *KEY_ONLY_ON_CHANGE = "selectionFx/onlyOnChange";
++constexpr const char *GROUP_CHARACTERS = "characterMedia";
++
++QString characterKey(const QString &characterName) {
++  return QStringLiteral("characterMedia/") + characterName;
++}
++
++// Windows file names are case-insensitive.
++bool samePath(const QString &a, const QString &b) {
++  return QString::compare(QDir::cleanPath(a), QDir::cleanPath(b),
++                          Qt::CaseInsensitive) == 0;
++}
++} // namespace
++
++QString defaultMediaFolder() {
++  return QCoreApplication::applicationDirPath() + QStringLiteral("/media");
++}
++
++Settings Settings::load() {
++  const Config &cfg = Config::instance();
++  Settings s;
++
++  s.mediaFolder =
++      cfg.customValue(KEY_MEDIA_FOLDER, defaultMediaFolder()).toString().trimmed();
++  if (s.mediaFolder.isEmpty()) {
++    s.mediaFolder = defaultMediaFolder();
++  }
++  s.imageEnabled = cfg.customValue(KEY_IMAGE_ENABLED, true).toBool();
++  s.sizePercent = qBound(5, cfg.customValue(KEY_SIZE_PERCENT, 35).toInt(), 100);
++  s.position = qBound(0, cfg.customValue(KEY_POSITION, s.position).toInt(), 8);
++  s.animationEnabled = cfg.customValue(KEY_ANIMATION, true).toBool();
++  s.audioEnabled = cfg.customValue(KEY_AUDIO_ENABLED, true).toBool();
++  s.volume = qBound(0, cfg.customValue(KEY_VOLUME, 70).toInt(), 100);
++  s.onlyOnChange = cfg.customValue(KEY_ONLY_ON_CHANGE, true).toBool();
++  return s;
++}
++
++void Settings::save() const {
++  Config &cfg = Config::instance();
++  cfg.setCustomValue(KEY_MEDIA_FOLDER, mediaFolder);
++  cfg.setCustomValue(KEY_IMAGE_ENABLED, imageEnabled);
++  cfg.setCustomValue(KEY_SIZE_PERCENT, sizePercent);
++  cfg.setCustomValue(KEY_POSITION, position);
++  cfg.setCustomValue(KEY_ANIMATION, animationEnabled);
++  cfg.setCustomValue(KEY_AUDIO_ENABLED, audioEnabled);
++  cfg.setCustomValue(KEY_VOLUME, volume);
++  cfg.setCustomValue(KEY_ONLY_ON_CHANGE, onlyOnChange);
++}
++
++CharacterMedia characterMedia(const QString &characterName) {
++  CharacterMedia media;
++  if (characterName.isEmpty()) {
++    return media;
++  }
++  const Config &cfg = Config::instance();
++  const QString base = characterKey(characterName) + QLatin1Char('/');
++  media.image = cfg.customValue(base + QStringLiteral("image")).toString();
++  media.audio = cfg.customValue(base + QStringLiteral("audio")).toString();
++  media.sizePercent =
++      qBound(0, cfg.customValue(base + QStringLiteral("sizePercent"), 0).toInt(),
++             100);
++  return media;
++}
++
++void setCharacterMedia(const QString &characterName,
++                       const CharacterMedia &media) {
++  if (characterName.isEmpty()) {
++    return;
++  }
++  Config &cfg = Config::instance();
++  const QString base = characterKey(characterName) + QLatin1Char('/');
++  cfg.setCustomValue(base + QStringLiteral("image"), media.image);
++  cfg.setCustomValue(base + QStringLiteral("audio"), media.audio);
++  cfg.setCustomValue(base + QStringLiteral("sizePercent"), media.sizePercent);
++}
++
++void removeCharacterMedia(const QString &characterName) {
++  if (!characterName.isEmpty()) {
++    Config::instance().removeCustomKey(characterKey(characterName));
++  }
++}
++
++QStringList configuredCharacters() {
++  return Config::instance().customChildGroups(
++      QString::fromLatin1(GROUP_CHARACTERS));
++}
++
++QStringList imageNameFilters() {
++  return {QStringLiteral("*.png"), QStringLiteral("*.jpg"),
++          QStringLiteral("*.jpeg"), QStringLiteral("*.bmp"),
++          QStringLiteral("*.gif")};
++}
++
++QStringList audioNameFilters() {
++  return {QStringLiteral("*.wav"), QStringLiteral("*.mp3"),
++          QStringLiteral("*.ogg"), QStringLiteral("*.flac"),
++          QStringLiteral("*.m4a")};
++}
++
++static bool matchesFilters(const QString &fileName, const QStringList &filters) {
++  const QString suffix = QFileInfo(fileName).suffix().toLower();
++  for (const QString &filter : filters) {
++    if (filter.mid(2) == suffix) { // "*.png" -> "png"
++      return true;
++    }
++  }
++  return false;
++}
++
++bool isImageFile(const QString &fileName) {
++  return matchesFilters(fileName, imageNameFilters());
++}
++
++bool isAudioFile(const QString &fileName) {
++  return matchesFilters(fileName, audioNameFilters());
++}
++
++QStringList listMediaFiles(const QString &folder, const QStringList &filters) {
++  const QDir dir(folder);
++  if (folder.isEmpty() || !dir.exists()) {
++    return QStringList();
++  }
++  return dir.entryList(filters, QDir::Files, QDir::Name | QDir::IgnoreCase);
++}
++
++QString resolveMediaPath(const QString &folder, const QString &fileOrPath) {
++  if (fileOrPath.isEmpty()) {
++    return QString();
++  }
++  if (QFileInfo(fileOrPath).isAbsolute()) {
++    return fileOrPath;
++  }
++  return QDir(folder).filePath(fileOrPath);
++}
++
++QString importIntoFolder(const QString &folder, const QString &sourcePath) {
++  const QFileInfo source(sourcePath);
++  if (!source.exists() || !source.isFile() || folder.isEmpty()) {
++    return QString();
++  }
++
++  QDir dir(folder);
++  if (!dir.exists() && !QDir().mkpath(folder)) {
++    return QString();
++  }
++
++  // Already in the media folder: nothing to copy.
++  if (samePath(source.absolutePath(), dir.absolutePath())) {
++    return source.fileName();
++  }
++
++  QString name = source.fileName();
++  for (int attempt = 0; attempt < 1000; ++attempt) {
++    const QFileInfo target(dir.filePath(name));
++    if (!target.exists()) {
++      break;
++    }
++    if (target.size() == source.size()) {
++      return name; // same file was imported before
++    }
++    name = QStringLiteral("%1_%2.%3")
++               .arg(source.completeBaseName())
++               .arg(attempt + 1)
++               .arg(source.suffix());
++  }
++
++  if (!QFile::copy(sourcePath, dir.filePath(name))) {
++    return QString();
++  }
++  return name;
++}
++
++QRectF imageRect(const QSizeF &container, const QSizeF &imageSize,
++                 int sizePercent, OverlayPosition position, qreal margin) {
++  if (container.isEmpty() || imageSize.isEmpty()) {
++    return QRectF();
++  }
++
++  const qreal fraction = qBound(5, sizePercent, 100) / 100.0;
++  QSizeF box(container.width() * fraction, container.height() * fraction);
++  box.setWidth(qMin(box.width(), container.width() - 2 * margin));
++  box.setHeight(qMin(box.height(), container.height() - 2 * margin));
++  if (box.width() < 1.0 || box.height() < 1.0) {
++    return QRectF();
++  }
++
++  const QSizeF size = imageSize.scaled(box, Qt::KeepAspectRatio);
++
++  const qreal left = margin;
++  const qreal centerX = (container.width() - size.width()) / 2.0;
++  const qreal right = container.width() - size.width() - margin;
++  const qreal top = margin;
++  const qreal centerY = (container.height() - size.height()) / 2.0;
++  const qreal bottom = container.height() - size.height() - margin;
++
++  qreal x = left;
++  qreal y = bottom;
++  switch (position) {
++  case OverlayPosition::TopLeft:      x = left;    y = top;     break;
++  case OverlayPosition::TopCenter:    x = centerX; y = top;     break;
++  case OverlayPosition::TopRight:     x = right;   y = top;     break;
++  case OverlayPosition::CenterLeft:   x = left;    y = centerY; break;
++  case OverlayPosition::Center:       x = centerX; y = centerY; break;
++  case OverlayPosition::CenterRight:  x = right;   y = centerY; break;
++  case OverlayPosition::BottomLeft:   x = left;    y = bottom;  break;
++  case OverlayPosition::BottomCenter: x = centerX; y = bottom;  break;
++  case OverlayPosition::BottomRight:  x = right;   y = bottom;  break;
++  }
++  return QRectF(QPointF(x, y), size);
++}
++
++} // namespace SelectionFx
+diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
+--- a/src/selectionfxpage.cpp	1970-01-01 00:00:00.000000000 +0000
++++ b2/src/selectionfxpage.cpp	2026-10-15 17:30:27.757188799 +0000
+@@ -0,0 +1,919 @@
++#include "selectionfxpage.h"
++#include "config.h"
++#include "overlayinfo.h"
++#include "stylesheet.h"
++#include "windowcapture.h"
++#include <QAudioOutput>
++#include <QCheckBox>
++#include <QComboBox>
++#include <QCoreApplication>
++#include <QDateTime>
++#include <QDesktopServices>
++#include <QDir>
++#include <QDragEnterEvent>
++#include <QDropEvent>
++#include <QFileDialog>
++#include <QFileInfo>
++#include <QHBoxLayout>
++#include <QHideEvent>
++#include <QImageReader>
++#include <QLabel>
++#include <QLineEdit>
++#include <QMediaPlayer>
++#include <QMessageBox>
++#include <QMimeData>
++#include <QMouseEvent>
++#include <QMovie>
++#include <QPainter>
++#include <QPainterPath>
++#include <QPushButton>
++#include <QSet>
++#include <QShowEvent>
++#include <QSignalBlocker>
++#include <QSlider>
++#include <QSpinBox>
++#include <QUrl>
++#include <QVBoxLayout>
++#include <utility>
++
++namespace {
++
++constexpr int MAX_IMAGE_DIM = 512;
++
++QString rowStyle(bool selected) {
++  return QStringLiteral("QWidget#mediaRow { background-color: #2a2a2a; "
++                        "border: 1px solid %1; border-radius: 4px; }")
++      .arg(selected ? StyleSheet::colorAccent() : QStringLiteral("#3a3a3a"));
++}
++
++const char *kDeleteButtonStyle =
++    "QPushButton { background-color: #3a3a3a; color: #ffffff; "
++    "border: 1px solid #555555; border-radius: 4px; font-size: 18px; "
++    "font-weight: bold; padding: 0px; }"
++    "QPushButton:hover { background-color: #e74c3c; border: 1px solid "
++    "#c0392b; }"
++    "QPushButton:pressed { background-color: #c0392b; }";
++
++QPushButton *makeSmallButton(const QString &text, const QString &tooltip) {
++  auto *button = new QPushButton(text);
++  button->setFixedSize(30, 30);
++  button->setToolTip(tooltip);
++  button->setCursor(Qt::PointingHandCursor);
++  button->setAutoDefault(false);
++  button->setStyleSheet(StyleSheet::getButtonStyleSheet());
++  return button;
++}
++
++QLabel *makeRowLabel(const QString &text) {
++  auto *label = new QLabel(text);
++  label->setStyleSheet(StyleSheet::getLabelStyleSheet());
++  return label;
++}
++
++} // namespace
++
++// ---------------------------------------------------------------------------
++// MediaPreviewBox
++// ---------------------------------------------------------------------------
++
++MediaPreviewBox::MediaPreviewBox(QWidget *parent) : QWidget(parent) {
++  setMinimumSize(160, 90);
++}
++
++void MediaPreviewBox::setLayoutOptions(int sizePercent,
++                                       OverlayPosition position) {
++  if (m_sizePercent == sizePercent && m_position == position) {
++    return;
++  }
++  m_sizePercent = sizePercent;
++  m_position = position;
++  update();
++}
++
++void MediaPreviewBox::setMedia(const QString &path) {
++  const QDateTime stamp =
++      path.isEmpty() ? QDateTime() : QFileInfo(path).lastModified();
++  if (path == m_path && stamp == m_stamp) {
++    return;
++  }
++  m_path = path;
++  m_stamp = stamp;
++
++  if (m_movie) {
++    m_movie->stop();
++    m_movie->deleteLater();
++    m_movie = nullptr;
++  }
++  m_idle = QPixmap();
++
++  if (!path.isEmpty() && QFileInfo::exists(path)) {
++    QImageReader reader(path);
++    reader.setAutoTransform(true);
++    const bool animated = reader.supportsAnimation();
++    QImage image = reader.read();
++    if (!image.isNull()) {
++      if (image.width() > MAX_IMAGE_DIM || image.height() > MAX_IMAGE_DIM) {
++        image = image.scaled(MAX_IMAGE_DIM, MAX_IMAGE_DIM, Qt::KeepAspectRatio,
++                             Qt::SmoothTransformation);
++      }
++      m_idle = QPixmap::fromImage(image);
++
++      if (animated) {
++        auto *movie = new QMovie(path, QByteArray(), this);
++        if (movie->isValid()) {
++          m_movie = movie;
++          connect(m_movie, &QMovie::frameChanged, this, [this]() { update(); });
++          if (isVisible()) {
++            m_movie->start();
++          }
++        } else {
++          delete movie;
++        }
++      }
++    }
++  }
++  update();
++}
++
++void MediaPreviewBox::showEvent(QShowEvent *event) {
++  QWidget::showEvent(event);
++  if (m_movie) {
++    m_movie->start();
++  }
++}
++
++void MediaPreviewBox::hideEvent(QHideEvent *event) {
++  QWidget::hideEvent(event);
++  if (m_movie) {
++    m_movie->stop();
++  }
++}
++
++void MediaPreviewBox::paintEvent(QPaintEvent *) {
++  QPainter painter(this);
++  painter.setRenderHint(QPainter::Antialiasing);
++  painter.setRenderHint(QPainter::SmoothPixmapTransform);
++
++  const QRectF bounds = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
++  painter.setPen(QPen(QColor(0x3a, 0x3a, 0x3a), 1));
++  painter.setBrush(QColor(20, 24, 30));
++  painter.drawRoundedRect(bounds, 4, 4);
++
++  painter.setPen(QColor(255, 255, 255, 45));
++  painter.drawText(bounds.adjusted(0, 6, 0, 0), Qt::AlignHCenter | Qt::AlignTop,
++                   QStringLiteral("Preview window"));
++
++  if (m_idle.isNull()) {
++    painter.setPen(QColor(150, 150, 150));
++    painter.drawText(bounds, Qt::AlignCenter,
++                     QStringLiteral("No image selected"));
++    return;
++  }
++
++  const QRectF box = SelectionFx::imageRect(QSizeF(size()), QSizeF(m_idle.size()),
++                                            m_sizePercent, m_position, 8.0);
++  if (box.isEmpty()) {
++    return;
++  }
++
++  QPainterPath plate;
++  plate.addRoundedRect(box, 6, 6);
++  painter.fillPath(plate, QColor(10, 14, 20, 110));
++
++  QPixmap frame;
++  if (m_movie && m_movie->state() == QMovie::Running) {
++    frame = m_movie->currentPixmap();
++  }
++  if (frame.isNull()) {
++    frame = m_idle;
++  }
++  painter.drawPixmap(box, frame, QRectF(frame.rect()));
++
++  painter.setBrush(Qt::NoBrush);
++  painter.setPen(QPen(Config::instance().highlightColor(), 1.5));
++  painter.drawRoundedRect(box, 6, 6);
++}
++
++// ---------------------------------------------------------------------------
++// MediaRow
++// ---------------------------------------------------------------------------
++
++MediaRow::MediaRow() {
++  setObjectName(QStringLiteral("mediaRow"));
++  setAttribute(Qt::WA_StyledBackground, true);
++  setAcceptDrops(true);
++  setStyleSheet(rowStyle(false));
++}
++
++void MediaRow::setSelectedLook(bool selected) {
++  setStyleSheet(rowStyle(selected));
++}
++
++void MediaRow::dragEnterEvent(QDragEnterEvent *event) {
++  if (event->mimeData()->hasUrls()) {
++    event->acceptProposedAction();
++  }
++}
++
++void MediaRow::dropEvent(QDropEvent *event) {
++  QStringList files;
++  const QList<QUrl> urls = event->mimeData()->urls();
++  for (const QUrl &url : urls) {
++    if (url.isLocalFile()) {
++      files.append(url.toLocalFile());
++    }
++  }
++  if (!files.isEmpty()) {
++    event->acceptProposedAction();
++    if (onFilesDropped) {
++      onFilesDropped(files);
++    }
++  }
++}
++
++void MediaRow::mousePressEvent(QMouseEvent *event) {
++  if (onClicked) {
++    onClicked();
++  }
++  QWidget::mousePressEvent(event);
++}
++
++// ---------------------------------------------------------------------------
++// SelectionFxPage
++// ---------------------------------------------------------------------------
++
++SelectionFxPage::SelectionFxPage(QWidget *parent) : QWidget(parent) {
++  auto *layout = new QVBoxLayout(this);
++  layout->setSpacing(10);
++  layout->setContentsMargins(0, 0, 5, 0);
++
++  // Builds a styled section like the other settings pages and returns its
++  // layout so the caller can add controls.
++  auto makeSection = [layout](const QString &title, const QString &info,
++                              const QStringList &keywords) -> QVBoxLayout * {
++    auto *section = new QWidget();
++    section->setStyleSheet(StyleSheet::getSectionStyleSheet());
++    section->setProperty("searchKeywords", keywords);
++    auto *sectionLayout = new QVBoxLayout(section);
++    sectionLayout->setContentsMargins(16, 12, 16, 12);
++    sectionLayout->setSpacing(10);
++
++    auto *header = new QLabel(title);
++    header->setStyleSheet(StyleSheet::getSectionHeaderStyleSheet());
++    sectionLayout->addWidget(header);
++
++    if (!info.isEmpty()) {
++      auto *infoLabel = new QLabel(info);
++      infoLabel->setWordWrap(true);
++      infoLabel->setStyleSheet(StyleSheet::getInfoLabelStyleSheet());
++      sectionLayout->addWidget(infoLabel);
++    }
++    layout->addWidget(section);
++    return sectionLayout;
++  };
++
++  // ---- Media folder -------------------------------------------------------
++  QVBoxLayout *folderSection = makeSection(
++      QStringLiteral("Selection Feedback"),
++      QStringLiteral(
++          "Show an image or GIF on each client's preview and play a sound when "
++          "you switch to it. Everything is loaded from one media folder; "
++          "files you choose from elsewhere are copied into it. Images: PNG, "
++          "JPG, BMP, GIF (GIFs play when a client is selected). Audio: WAV, "
++          "MP3, OGG, FLAC, M4A."),
++      {"selection", "feedback", "image", "gif", "audio", "sound", "voice",
++       "portrait", "media", "folder", "rts"});
++
++  auto *folderRow = new QHBoxLayout();
++  folderRow->setSpacing(8);
++  auto *folderLabel = new QLabel(QStringLiteral("Media folder:"));
++  folderLabel->setStyleSheet(StyleSheet::getLabelStyleSheet());
++  folderLabel->setFixedWidth(100);
++  m_folderEdit = new QLineEdit();
++  m_folderEdit->setStyleSheet(StyleSheet::getTableCellEditorStyleSheet());
++  auto *browseFolderButton = new QPushButton(QStringLiteral("Browse..."));
++  auto *openFolderButton = new QPushButton(QStringLiteral("Open Folder"));
++  for (QPushButton *b : {browseFolderButton, openFolderButton}) {
++    b->setStyleSheet(StyleSheet::getButtonStyleSheet());
++    b->setAutoDefault(false);
++    b->setCursor(Qt::PointingHandCursor);
++  }
++  folderRow->addWidget(folderLabel);
++  folderRow->addWidget(m_folderEdit, 1);
++  folderRow->addWidget(browseFolderButton);
++  folderRow->addWidget(openFolderButton);
++  folderSection->addLayout(folderRow);
++
++  m_onlyOnChangeCheck = new QCheckBox(QStringLiteral(
++      "Only trigger when switching to a different client"));
++  m_onlyOnChangeCheck->setStyleSheet(StyleSheet::getCheckBoxStyleSheet());
++  folderSection->addWidget(m_onlyOnChangeCheck);
++
++  connect(browseFolderButton, &QPushButton::clicked, this,
++          [this]() { browseForFolder(); });
++  connect(openFolderButton, &QPushButton::clicked, this, [this]() {
++    QDir().mkpath(mediaFolder());
++    QDesktopServices::openUrl(QUrl::fromLocalFile(mediaFolder()));
++  });
++  connect(m_folderEdit, &QLineEdit::editingFinished, this, [this]() {
++    refreshFileLists();
++    updatePreview();
++  });
++
++  // ---- Image --------------------------------------------------------------
++  QVBoxLayout *imageSection = makeSection(
++      QStringLiteral("Image Size and Position"),
++      QStringLiteral("The image is scaled to fit within this percentage of the "
++                     "preview window's width and height (its proportions are "
++                     "kept). The preview on the right shows the result for the "
++                     "selected character."),
++      {"image", "gif", "size", "scale", "position", "preview", "animation"});
++
++  auto *imageColumns = new QHBoxLayout();
++  imageColumns->setSpacing(16);
++
++  auto *controls = new QVBoxLayout();
++  controls->setSpacing(10);
++
++  m_imageCheck = new QCheckBox(QStringLiteral("Show images on previews"));
++  m_imageCheck->setStyleSheet(StyleSheet::getCheckBoxStyleSheet());
++  controls->addWidget(m_imageCheck);
++
++  auto *sizeRow = new QHBoxLayout();
++  auto *sizeLabel = new QLabel(QStringLiteral("Default size:"));
++  sizeLabel->setStyleSheet(StyleSheet::getLabelStyleSheet());
++  sizeLabel->setFixedWidth(100);
++  m_sizeSlider = new QSlider(Qt::Horizontal);
++  m_sizeSlider->setRange(5, 100);
++  m_sizeSlider->setFixedWidth(180);
++  m_sizeValue = new QLabel(QStringLiteral("35%"));
++  m_sizeValue->setStyleSheet(StyleSheet::getLabelStyleSheet());
++  m_sizeValue->setFixedWidth(44);
++  sizeRow->addWidget(sizeLabel);
++  sizeRow->addWidget(m_sizeSlider);
++  sizeRow->addWidget(m_sizeValue);
++  sizeRow->addStretch();
++  controls->addLayout(sizeRow);
++
++  auto *positionRow = new QHBoxLayout();
++  auto *positionLabel = new QLabel(QStringLiteral("Position:"));
++  positionLabel->setStyleSheet(StyleSheet::getLabelStyleSheet());
++  positionLabel->setFixedWidth(100);
++  m_positionCombo = new QComboBox();
++  m_positionCombo->setStyleSheet(StyleSheet::getComboBoxStyleSheet());
++  m_positionCombo->setFixedWidth(180);
++  const QStringList positions = {"Top Left",    "Top Center",   "Top Right",
++                                 "Center Left", "Center",       "Center Right",
++                                 "Bottom Left", "Bottom Center", "Bottom Right"};
++  for (int i = 0; i < positions.size(); ++i) {
++    m_positionCombo->addItem(positions.at(i), i);
++  }
++  positionRow->addWidget(positionLabel);
++  positionRow->addWidget(m_positionCombo);
++  positionRow->addStretch();
++  controls->addLayout(positionRow);
++
++  m_animateCheck = new QCheckBox(
++      QStringLiteral("Pop animation when a client is selected"));
++  m_animateCheck->setStyleSheet(StyleSheet::getCheckBoxStyleSheet());
++  controls->addWidget(m_animateCheck);
++  controls->addStretch();
++
++  auto *previewColumn = new QVBoxLayout();
++  previewColumn->setSpacing(6);
++  m_preview = new MediaPreviewBox();
++  m_previewCaption = new QLabel();
++  m_previewCaption->setStyleSheet(StyleSheet::getInfoLabelStyleSheet());
++  m_previewCaption->setWordWrap(true);
++  previewColumn->addWidget(m_preview);
++  previewColumn->addWidget(m_previewCaption);
++  previewColumn->addStretch();
++
++  imageColumns->addLayout(controls, 1);
++  imageColumns->addLayout(previewColumn);
++  imageSection->addLayout(imageColumns);
++
++  connect(m_sizeSlider, &QSlider::valueChanged, this, [this](int value) {
++    m_sizeValue->setText(QStringLiteral("%1%").arg(value));
++    updatePreview();
++  });
++  connect(m_positionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
++          this, [this](int) { updatePreview(); });
++
++  // ---- Audio --------------------------------------------------------------
++  QVBoxLayout *audioSection = makeSection(
++      QStringLiteral("Audio"),
++      QStringLiteral("Each character can have its own clip (chosen below). A "
++                     "new clip interrupts the previous one."),
++      {"audio", "sound", "voice", "volume", "mp3", "wav"});
++
++  m_audioCheck = new QCheckBox(
++      QStringLiteral("Play a character's audio clip when it is selected"));
++  m_audioCheck->setStyleSheet(StyleSheet::getCheckBoxStyleSheet());
++  audioSection->addWidget(m_audioCheck);
++
++  auto *volumeRow = new QHBoxLayout();
++  auto *volumeLabel = new QLabel(QStringLiteral("Volume:"));
++  volumeLabel->setStyleSheet(StyleSheet::getLabelStyleSheet());
++  volumeLabel->setFixedWidth(100);
++  m_volumeSlider = new QSlider(Qt::Horizontal);
++  m_volumeSlider->setRange(0, 100);
++  m_volumeSlider->setFixedWidth(180);
++  m_volumeValue = new QLabel(QStringLiteral("70%"));
++  m_volumeValue->setStyleSheet(StyleSheet::getLabelStyleSheet());
++  m_volumeValue->setFixedWidth(44);
++  volumeRow->addWidget(volumeLabel);
++  volumeRow->addWidget(m_volumeSlider);
++  volumeRow->addWidget(m_volumeValue);
++  volumeRow->addStretch();
++  audioSection->addLayout(volumeRow);
++
++  connect(m_volumeSlider, &QSlider::valueChanged, this, [this](int value) {
++    m_volumeValue->setText(QStringLiteral("%1%").arg(value));
++  });
++
++  m_testOutput = new QAudioOutput(this);
++  m_testPlayer = new QMediaPlayer(this);
++  m_testPlayer->setAudioOutput(m_testOutput);
++
++  // ---- Characters ---------------------------------------------------------
++  QVBoxLayout *characterSection = makeSection(
++      QStringLiteral("Characters"),
++      QStringLiteral("Pick an image/GIF and an audio clip for each character. "
++                     "Use the dropdowns to choose files from the media folder, "
++                     "\"...\" to choose a file from anywhere (it is copied into "
++                     "the folder), or drag files onto a row. \"Size\" overrides "
++                     "the default size for that character. Names must match "
++                     "the character name in the EVE window title."),
++      {"character", "image", "gif", "audio", "sound", "size", "drag", "drop"});
++
++  auto *buttonRow = new QHBoxLayout();
++  auto *addButton = new QPushButton(QStringLiteral("Add Character"));
++  auto *populateButton =
++      new QPushButton(QStringLiteral("Add from Open EVE Windows"));
++  for (QPushButton *b : {addButton, populateButton}) {
++    b->setStyleSheet(StyleSheet::getButtonStyleSheet());
++    b->setAutoDefault(false);
++    b->setCursor(Qt::PointingHandCursor);
++  }
++  buttonRow->addWidget(addButton);
++  buttonRow->addWidget(populateButton);
++  buttonRow->addStretch();
++  characterSection->addLayout(buttonRow);
++
++  m_rowsContainer = new QWidget();
++  m_rowsLayout = new QVBoxLayout(m_rowsContainer);
++  m_rowsLayout->setContentsMargins(0, 0, 0, 0);
++  m_rowsLayout->setSpacing(6);
++  characterSection->addWidget(m_rowsContainer);
++
++  connect(addButton, &QPushButton::clicked, this, [this]() {
++    MediaRow *row = addRow(QString(), SelectionFx::CharacterMedia());
++    selectRow(row);
++    row->nameEdit->setFocus();
++  });
++  connect(populateButton, &QPushButton::clicked, this,
++          [this]() { addFromOpenWindows(); });
++
++  layout->addStretch();
++  updateAspect();
++}
++
++QString SelectionFxPage::mediaFolder() const {
++  const QString text = m_folderEdit ? m_folderEdit->text().trimmed() : QString();
++  return text.isEmpty() ? SelectionFx::defaultMediaFolder() : text;
++}
++
++void SelectionFxPage::populateCombo(QComboBox *combo, const QStringList &filters,
++                                    const QString &current) {
++  const QSignalBlocker blocker(combo);
++  combo->clear();
++  combo->addItem(QStringLiteral("(none)"), QString());
++
++  const QStringList files = SelectionFx::listMediaFiles(mediaFolder(), filters);
++  for (const QString &file : files) {
++    combo->addItem(file, file);
++  }
++
++  int index = current.isEmpty() ? 0 : combo->findData(current);
++  if (index < 0) {
++    // The stored file isn't in the folder (moved or deleted): keep showing it
++    // so the setting isn't silently lost.
++    combo->addItem(
++        QStringLiteral("%1 (missing)").arg(QFileInfo(current).fileName()),
++        current);
++    index = combo->count() - 1;
++  }
++  combo->setCurrentIndex(index);
++}
++
++MediaRow *SelectionFxPage::addRow(const QString &name,
++                                  const SelectionFx::CharacterMedia &media) {
++  auto *row = new MediaRow();
++
++  auto *outer = new QHBoxLayout(row);
++  outer->setContentsMargins(8, 6, 8, 6);
++  outer->setSpacing(8);
++
++  row->thumb = new QLabel();
++  row->thumb->setFixedSize(48, 48);
++  row->thumb->setAlignment(Qt::AlignCenter);
++  row->thumb->setStyleSheet(
++      QStringLiteral("QLabel { background-color: #1e1e1e; border: 1px solid "
++                     "#3a3a3a; border-radius: 3px; color: #777777; }"));
++  outer->addWidget(row->thumb);
++
++  auto *column = new QVBoxLayout();
++  column->setSpacing(6);
++
++  // Line 1: name, size override, delete
++  auto *top = new QHBoxLayout();
++  top->setSpacing(6);
++  row->nameEdit = new QLineEdit(name);
++  row->nameEdit->setPlaceholderText(QStringLiteral("Character name"));
++  row->nameEdit->setStyleSheet(StyleSheet::getTableCellEditorStyleSheet());
++  row->nameEdit->setAcceptDrops(false); // let file drops reach the row
++
++  row->sizeSpin = new QSpinBox();
++  row->sizeSpin->setRange(0, 100);
++  row->sizeSpin->setSuffix(QStringLiteral("%"));
++  row->sizeSpin->setSpecialValueText(QStringLiteral("Default"));
++  row->sizeSpin->setValue(media.sizePercent);
++  row->sizeSpin->setFixedWidth(90);
++  row->sizeSpin->setStyleSheet(StyleSheet::getSpinBoxStyleSheet());
++  row->sizeSpin->setToolTip(
++      QStringLiteral("Size for this character (% of the preview window). "
++                     "\"Default\" uses the default size above."));
++
++  row->deleteButton = new QPushButton(QStringLiteral("\u00D7"));
++  row->deleteButton->setFixedSize(30, 30);
++  row->deleteButton->setCursor(Qt::PointingHandCursor);
++  row->deleteButton->setToolTip(QStringLiteral("Remove this character"));
++  row->deleteButton->setAutoDefault(false);
++  row->deleteButton->setStyleSheet(QString::fromLatin1(kDeleteButtonStyle));
++
++  top->addWidget(row->nameEdit, 1);
++  top->addWidget(makeRowLabel(QStringLiteral("Size:")));
++  top->addWidget(row->sizeSpin);
++  top->addWidget(row->deleteButton);
++
++  // Line 2: image + audio pickers
++  auto *bottom = new QHBoxLayout();
++  bottom->setSpacing(6);
++
++  row->imageCombo = new QComboBox();
++  row->imageCombo->setStyleSheet(StyleSheet::getComboBoxStyleSheet());
++  row->imageCombo->setMinimumWidth(120);
++  row->imageBrowse = makeSmallButton(
++      QStringLiteral("..."),
++      QStringLiteral("Choose an image or GIF from anywhere (copied into the "
++                     "media folder)"));
++
++  row->audioCombo = new QComboBox();
++  row->audioCombo->setStyleSheet(StyleSheet::getComboBoxStyleSheet());
++  row->audioCombo->setMinimumWidth(120);
++  row->audioBrowse = makeSmallButton(
++      QStringLiteral("..."),
++      QStringLiteral("Choose an audio file from anywhere (copied into the "
++                     "media folder)"));
++  row->audioPlay = makeSmallButton(QStringLiteral("\u25B6"),
++                                   QStringLiteral("Play this audio clip"));
++
++  bottom->addWidget(makeRowLabel(QStringLiteral("Image:")));
++  bottom->addWidget(row->imageCombo, 1);
++  bottom->addWidget(row->imageBrowse);
++  bottom->addSpacing(8);
++  bottom->addWidget(makeRowLabel(QStringLiteral("Audio:")));
++  bottom->addWidget(row->audioCombo, 1);
++  bottom->addWidget(row->audioBrowse);
++  bottom->addWidget(row->audioPlay);
++
++  column->addLayout(top);
++  column->addLayout(bottom);
++  outer->addLayout(column, 1);
++
++  populateCombo(row->imageCombo, SelectionFx::imageNameFilters(), media.image);
++  populateCombo(row->audioCombo, SelectionFx::audioNameFilters(), media.audio);
++  updateRowThumb(row);
++
++  // Interacting with any part of a row makes it the previewed one.
++  connect(row->nameEdit, &QLineEdit::textEdited, this,
++          [this, row]() { selectRow(row); });
++  connect(row->imageCombo, QOverload<int>::of(&QComboBox::activated), this,
++          [this, row](int) {
++            updateRowThumb(row);
++            selectRow(row);
++          });
++  connect(row->audioCombo, QOverload<int>::of(&QComboBox::activated), this,
++          [this, row](int) { selectRow(row); });
++  connect(row->sizeSpin, QOverload<int>::of(&QSpinBox::valueChanged), this,
++          [this, row](int) { selectRow(row); });
++  connect(row->imageBrowse, &QPushButton::clicked, this,
++          [this, row]() { browseForFile(row, true); });
++  connect(row->audioBrowse, &QPushButton::clicked, this,
++          [this, row]() { browseForFile(row, false); });
++  connect(row->audioPlay, &QPushButton::clicked, this,
++          [this, row]() { playTest(row); });
++  connect(row->deleteButton, &QPushButton::clicked, this,
++          [this, row]() { removeRow(row); });
++
++  row->onFilesDropped = [this, row](const QStringList &files) {
++    handleDrop(row, files);
++  };
++  row->onClicked = [this, row]() { selectRow(row); };
++
++  m_rowsLayout->addWidget(row);
++  m_rows.append(row);
++  return row;
++}
++
++void SelectionFxPage::removeRow(MediaRow *row) {
++  const bool wasSelected = (row == m_selectedRow);
++  m_rows.removeOne(row);
++  m_rowsLayout->removeWidget(row);
++  row->hide();
++  row->deleteLater();
++
++  if (wasSelected) {
++    m_selectedRow = nullptr;
++    selectRow(m_rows.isEmpty() ? nullptr : m_rows.first());
++  }
++}
++
++void SelectionFxPage::clearRows() {
++  for (MediaRow *row : std::as_const(m_rows)) {
++    m_rowsLayout->removeWidget(row);
++    row->hide();
++    row->deleteLater();
++  }
++  m_rows.clear();
++  m_selectedRow = nullptr;
++}
++
++void SelectionFxPage::selectRow(MediaRow *row) {
++  if (m_selectedRow && m_selectedRow != row && m_rows.contains(m_selectedRow)) {
++    m_selectedRow->setSelectedLook(false);
++  }
++  m_selectedRow = row;
++  if (row) {
++    row->setSelectedLook(true);
++  }
++  updatePreview();
++}
++
++void SelectionFxPage::refreshFileLists() {
++  for (MediaRow *row : std::as_const(m_rows)) {
++    populateCombo(row->imageCombo, SelectionFx::imageNameFilters(),
++                  row->imageCombo->currentData().toString());
++    populateCombo(row->audioCombo, SelectionFx::audioNameFilters(),
++                  row->audioCombo->currentData().toString());
++    updateRowThumb(row);
++  }
++}
++
++void SelectionFxPage::updateRowThumb(MediaRow *row) {
++  const QString file = row->imageCombo->currentData().toString();
++  const QString path = SelectionFx::resolveMediaPath(mediaFolder(), file);
++
++  QPixmap pixmap;
++  if (!file.isEmpty() && QFileInfo::exists(path)) {
++    QImageReader reader(path);
++    reader.setAutoTransform(true);
++    const QSize original = reader.size();
++    if (original.isValid()) {
++      reader.setScaledSize(original.scaled(88, 88, Qt::KeepAspectRatio));
++    }
++    const QImage image = reader.read();
++    if (!image.isNull()) {
++      pixmap = QPixmap::fromImage(
++          image.scaled(44, 44, Qt::KeepAspectRatio, Qt::SmoothTransformation));
++    }
++  }
++
++  if (pixmap.isNull()) {
++    row->thumb->setPixmap(QPixmap());
++    row->thumb->setText(QStringLiteral("-"));
++  } else {
++    row->thumb->setText(QString());
++    row->thumb->setPixmap(pixmap);
++  }
++}
++
++void SelectionFxPage::updateAspect() {
++  // Make the mock window the same shape as the real thumbnails.
++  const Config &cfg = Config::instance();
++  const int width = qMax(1, cfg.thumbnailWidth());
++  const int height = qMax(1, cfg.thumbnailHeight());
++  const int boxWidth = 320;
++  const int boxHeight = qBound(100, boxWidth * height / width, 240);
++  m_preview->setFixedSize(boxWidth, boxHeight);
++}
++
++void SelectionFxPage::updatePreview() {
++  updateAspect();
++
++  int percent = m_sizeSlider->value();
++  QString path;
++  QString caption =
++      QStringLiteral("Select a character below to preview its image.");
++
++  if (m_selectedRow) {
++    const QString file = m_selectedRow->imageCombo->currentData().toString();
++    path = SelectionFx::resolveMediaPath(mediaFolder(), file);
++    if (m_selectedRow->sizeSpin->value() > 0) {
++      percent = m_selectedRow->sizeSpin->value();
++    }
++    const QString name = m_selectedRow->nameEdit->text().trimmed();
++    caption = QStringLiteral("Previewing %1 on a %2 x %3 px window at %4%.")
++                  .arg(name.isEmpty() ? QStringLiteral("(unnamed)") : name)
++                  .arg(Config::instance().thumbnailWidth())
++                  .arg(Config::instance().thumbnailHeight())
++                  .arg(percent);
++  }
++
++  m_preview->setLayoutOptions(
++      percent,
++      static_cast<OverlayPosition>(m_positionCombo->currentData().toInt()));
++  m_preview->setMedia(path);
++  m_previewCaption->setText(caption);
++}
++
++void SelectionFxPage::browseForFolder() {
++  const QString current = mediaFolder();
++  const QString start =
++      QDir(current).exists() ? current : QCoreApplication::applicationDirPath();
++  const QString dir = QFileDialog::getExistingDirectory(
++      this, QStringLiteral("Select Media Folder"), start,
++      QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
++  if (dir.isEmpty()) {
++    return;
++  }
++  m_folderEdit->setText(dir);
++  refreshFileLists();
++  updatePreview();
++}
++
++void SelectionFxPage::browseForFile(MediaRow *row, bool image) {
++  const QString folder = mediaFolder();
++  QDir().mkpath(folder); // so the dialog opens in the media folder
++
++  const QStringList filters =
++      image ? SelectionFx::imageNameFilters() : SelectionFx::audioNameFilters();
++  const QString kind =
++      image ? QStringLiteral("Images and GIFs") : QStringLiteral("Audio");
++  const QString filter = QStringLiteral("%1 (%2);;All files (*)")
++                             .arg(kind)
++                             .arg(filters.join(QLatin1Char(' ')));
++
++  const QString path = QFileDialog::getOpenFileName(
++      this,
++      image ? QStringLiteral("Choose Image or GIF")
++            : QStringLiteral("Choose Audio File"),
++      folder, filter);
++  if (path.isEmpty()) {
++    return;
++  }
++  importAndSelect(row, image, path);
++}
++
++void SelectionFxPage::importAndSelect(MediaRow *row, bool image,
++                                      const QString &sourcePath) {
++  const QString name = SelectionFx::importIntoFolder(mediaFolder(), sourcePath);
++  if (name.isEmpty()) {
++    QMessageBox::warning(this, QStringLiteral("Could not add file"),
++                         QStringLiteral("The file could not be copied into the "
++                                        "media folder:\n%1")
++                             .arg(mediaFolder()));
++    return;
++  }
++
++  refreshFileLists(); // the new file now shows up in every dropdown
++
++  QComboBox *combo = image ? row->imageCombo : row->audioCombo;
++  const int index = combo->findData(name);
++  if (index >= 0) {
++    combo->setCurrentIndex(index);
++  }
++  if (image) {
++    updateRowThumb(row);
++  }
++  selectRow(row);
++}
++
++void SelectionFxPage::handleDrop(MediaRow *row, const QStringList &files) {
++  for (const QString &file : files) {
++    if (SelectionFx::isImageFile(file)) {
++      importAndSelect(row, true, file);
++    } else if (SelectionFx::isAudioFile(file)) {
++      importAndSelect(row, false, file);
++    }
++  }
++}
++
++void SelectionFxPage::addFromOpenWindows() {
++  QSet<QString> existing;
++  for (const MediaRow *row : std::as_const(m_rows)) {
++    existing.insert(row->nameEdit->text().trimmed());
++  }
++
++  WindowCapture capture;
++  const QVector<WindowInfo> windows = capture.getEVEWindows();
++
++  int added = 0;
++  MediaRow *firstAdded = nullptr;
++  for (const WindowInfo &window : windows) {
++    const QString name = OverlayInfo::extractCharacterName(window.title);
++    if (name.isEmpty() || existing.contains(name)) {
++      continue;
++    }
++    existing.insert(name);
++    MediaRow *row = addRow(name, SelectionFx::CharacterMedia());
++    if (!firstAdded) {
++      firstAdded = row;
++    }
++    ++added;
++  }
++
++  if (added == 0) {
++    QMessageBox::information(
++        this, QStringLiteral("No New Characters"),
++        QStringLiteral("No logged-in EVE clients were found that aren't "
++                       "already in the list."));
++  } else {
++    selectRow(firstAdded);
++  }
++}
++
++void SelectionFxPage::playTest(MediaRow *row) {
++  const QString file = row->audioCombo->currentData().toString();
++  const QString path = SelectionFx::resolveMediaPath(mediaFolder(), file);
++  if (file.isEmpty() || !QFileInfo::exists(path)) {
++    QMessageBox::information(
++        this, QStringLiteral("No Audio"),
++        QStringLiteral("Choose an audio file for this character first."));
++    return;
++  }
++
++  m_testPlayer->stop();
++  m_testOutput->setVolume(m_volumeSlider->value() / 100.0f);
++  m_testPlayer->setSource(QUrl::fromLocalFile(path));
++  m_testPlayer->play();
++  selectRow(row);
++}
++
++void SelectionFxPage::loadFromConfig() {
++  const SelectionFx::Settings fx = SelectionFx::Settings::load();
++
++  clearRows();
++
++  m_folderEdit->setText(fx.mediaFolder);
++  m_onlyOnChangeCheck->setChecked(fx.onlyOnChange);
++  m_imageCheck->setChecked(fx.imageEnabled);
++  m_sizeSlider->setValue(fx.sizePercent);
++  m_sizeValue->setText(QStringLiteral("%1%").arg(fx.sizePercent));
++  m_positionCombo->setCurrentIndex(qBound(0, fx.position, 8));
++  m_animateCheck->setChecked(fx.animationEnabled);
++  m_audioCheck->setChecked(fx.audioEnabled);
++  m_volumeSlider->setValue(fx.volume);
++  m_volumeValue->setText(QStringLiteral("%1%").arg(fx.volume));
++
++  QStringList names = SelectionFx::configuredCharacters();
++  names.sort(Qt::CaseInsensitive);
++  for (const QString &name : names) {
++    addRow(name, SelectionFx::characterMedia(name));
++  }
++  selectRow(m_rows.isEmpty() ? nullptr : m_rows.first());
++}
++
++void SelectionFxPage::saveToConfig() {
++  SelectionFx::Settings fx;
++  fx.mediaFolder = mediaFolder();
++  fx.onlyOnChange = m_onlyOnChangeCheck->isChecked();
++  fx.imageEnabled = m_imageCheck->isChecked();
++  fx.sizePercent = m_sizeSlider->value();
++  fx.position = m_positionCombo->currentData().toInt();
++  fx.animationEnabled = m_animateCheck->isChecked();
++  fx.audioEnabled = m_audioCheck->isChecked();
++  fx.volume = m_volumeSlider->value();
++  fx.save();
++
++  // Rewrite the per-character entries from the rows.
++  const QStringList existing = SelectionFx::configuredCharacters();
++  for (const QString &name : existing) {
++    SelectionFx::removeCharacterMedia(name);
++  }
++
++  for (const MediaRow *row : std::as_const(m_rows)) {
++    const QString name = row->nameEdit->text().trimmed();
++    if (name.isEmpty()) {
++      continue;
++    }
++    SelectionFx::CharacterMedia media;
++    media.image = row->imageCombo->currentData().toString();
++    media.audio = row->audioCombo->currentData().toString();
++    media.sizePercent = row->sizeSpin->value();
++    if (!media.isEmpty()) {
++      SelectionFx::setCharacterMedia(name, media);
++    }
++  }
++}
+diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
+--- a/src/thumbnailwidget.cpp	2026-10-15 14:26:00.204011479 +0000
++++ b2/src/thumbnailwidget.cpp	2026-10-15 17:14:57.591831294 +0000
+@@ -1,5 +1,6 @@
+ #include "thumbnailwidget.h"
+ #include "config.h"
++#include "selectionfx.h"
+ #include <QApplication>
+ #include <QDebug>
+ #include <QLinearGradient>
+@@ -8,6 +9,10 @@
+ #include <QPainterPath>
+ #include <QRadialGradient>
+ #include <QScreen>
++#include <QFileInfo>
++#include <QImageReader>
++#include <QMovie>
++#include <QVariantAnimation>
+ #include <QtMath>
+ #include <cmath>
+ #include <dwmapi.h>
+@@ -248,6 +253,7 @@
+   }
+ 
+   updateOverlayWidget();
++  refreshMedia();
+ }
+ 
+ void ThumbnailWidget::updateOverlayWidget() {
+@@ -264,6 +270,48 @@
+   }
+ }
+ 
++void ThumbnailWidget::refreshMedia() {
++  if (!m_overlayWidget) {
++    return;
++  }
++
++  const SelectionFx::Settings fx = SelectionFx::Settings::load();
++  QString path;
++  int percent = fx.sizePercent;
++
++  if (fx.imageEnabled && !m_characterName.isEmpty()) {
++    const SelectionFx::CharacterMedia media =
++        SelectionFx::characterMedia(m_characterName);
++    if (!media.image.isEmpty()) {
++      path = SelectionFx::resolveMediaPath(fx.mediaFolder, media.image);
++    }
++    if (media.sizePercent > 0) {
++      percent = media.sizePercent;
++    }
++  }
++
++  if (path.isEmpty() || !QFileInfo::exists(path)) {
++    m_overlayWidget->clearMedia();
++    return;
++  }
++
++  m_overlayWidget->setMediaStyle(static_cast<OverlayPosition>(fx.position),
++                                 percent, fx.animationEnabled);
++  m_overlayWidget->setMedia(path);
++}
++
++void ThumbnailWidget::playSelectEffect() {
++  if (m_overlayWidget && isVisible()) {
++    m_overlayWidget->playSelectAnimation();
++  }
++}
++
++void ThumbnailWidget::setSpeaking(bool speaking) {
++  if (m_overlayWidget) {
++    m_overlayWidget->setSpeaking(speaking);
++  }
++}
++
+ QPoint ThumbnailWidget::snapPosition(
+     const QPoint &pos, const QVector<ThumbnailWidget *> &otherThumbnails) {
+   const Config &cfg = Config::instance();
+@@ -1099,11 +1147,300 @@
+   }
+ }
+ 
++// ---------------------------------------------------------------------------
++// Selection feedback: image / GIF on the preview, animated on select
++// ---------------------------------------------------------------------------
++
++namespace {
++constexpr int MEDIA_MAX_DIM = 512;
++constexpr int MEDIA_MARGIN = 8;
++constexpr int SELECT_ANIM_MS = 450;
++constexpr int SPEAK_ANIM_MS = 700;
++constexpr int SPEAK_GUARD_MS = 15000; // safety net if "stopped" never arrives
++constexpr int GIF_MIN_PLAY_MS = 2500; // how long a GIF plays with no audio
++constexpr qreal TWO_PI = 6.28318530717958647692;
++} // namespace
++
++void OverlayWidget::setMedia(const QString &path) {
++  const QDateTime stamp =
++      path.isEmpty() ? QDateTime() : QFileInfo(path).lastModified();
++  if (path == m_mediaPath && stamp == m_mediaStamp) {
++    return; // nothing changed
++  }
++
++  if (m_movie) {
++    m_movie->stop();
++    m_movie->deleteLater();
++    m_movie = nullptr;
++  }
++  if (m_mediaHoldTimer) {
++    m_mediaHoldTimer->stop();
++  }
++  m_mediaPath = path;
++  m_mediaStamp = stamp;
++  m_mediaIdle = QPixmap();
++  m_mediaIdleScaled = QPixmap();
++  m_mediaIdleScaledPx = QSize();
++
++  if (!path.isEmpty()) {
++    QImageReader reader(path);
++    reader.setAutoTransform(true);
++    const bool animated = reader.supportsAnimation();
++    QImage image = reader.read(); // first frame for a GIF
++    if (image.isNull()) {
++      qWarning() << "OverlayWidget: could not load image" << path
++                 << reader.errorString();
++    } else {
++      if (image.width() > MEDIA_MAX_DIM || image.height() > MEDIA_MAX_DIM) {
++        image = image.scaled(MEDIA_MAX_DIM, MEDIA_MAX_DIM, Qt::KeepAspectRatio,
++                             Qt::SmoothTransformation);
++      }
++      m_mediaIdle = QPixmap::fromImage(image);
++
++      if (animated) {
++        auto *movie = new QMovie(path, QByteArray(), this);
++        if (movie->isValid()) {
++          m_movie = movie;
++          connect(m_movie, &QMovie::frameChanged, this, [this]() {
++            if (m_movie && m_movie->state() == QMovie::Running) {
++              update();
++            }
++          });
++        } else {
++          delete movie;
++        }
++      }
++    }
++  }
++  update();
++}
++
++void OverlayWidget::setMediaStyle(OverlayPosition position, int sizePercent,
++                                  bool animate) {
++  if (m_mediaPosition == position && m_mediaSizePercent == sizePercent &&
++      m_mediaAnimate == animate) {
++    return;
++  }
++  m_mediaPosition = position;
++  m_mediaSizePercent = sizePercent;
++  m_mediaAnimate = animate;
++  m_mediaIdleScaledPx = QSize();
++  update();
++}
++
++void OverlayWidget::beginMediaPlayback(int holdMs) {
++  if (!m_movie) {
++    return;
++  }
++  if (!m_mediaHoldTimer) {
++    m_mediaHoldTimer = new QTimer(this);
++    m_mediaHoldTimer->setSingleShot(true);
++    connect(m_mediaHoldTimer, &QTimer::timeout, this,
++            [this]() { maybeStopMovie(); });
++  }
++  if (holdMs > 0) {
++    m_mediaHoldTimer->start(holdMs);
++  }
++  if (m_movie->state() != QMovie::Running) {
++    m_movie->start();
++  }
++}
++
++// A GIF keeps playing while the character is speaking or the minimum play time
++// hasn't run out; afterwards it returns to its first frame.
++void OverlayWidget::maybeStopMovie() {
++  if (!m_movie || m_speaking) {
++    return;
++  }
++  if (m_mediaHoldTimer && m_mediaHoldTimer->isActive()) {
++    return;
++  }
++  m_movie->stop();
++  update();
++}
++
++void OverlayWidget::playSelectAnimation() {
++  if (m_mediaIdle.isNull() || !isVisible()) {
++    return;
++  }
++
++  if (m_mediaAnimate) {
++    if (!m_selectAnimation) {
++      m_selectAnimation = new QVariantAnimation(this);
++      m_selectAnimation->setStartValue(0.0);
++      m_selectAnimation->setEndValue(1.0);
++      m_selectAnimation->setDuration(SELECT_ANIM_MS);
++      m_selectAnimation->setEasingCurve(QEasingCurve::Linear);
++      connect(m_selectAnimation, &QVariantAnimation::valueChanged, this,
++              [this](const QVariant &value) {
++                m_selectProgress = value.toReal();
++                update();
++              });
++      connect(m_selectAnimation, &QVariantAnimation::finished, this, [this]() {
++        m_selectProgress = 1.0;
++        update();
++      });
++    }
++    m_selectAnimation->stop();
++    m_selectProgress = 0.0;
++    m_selectAnimation->start();
++  }
++
++  beginMediaPlayback(GIF_MIN_PLAY_MS);
++}
++
++void OverlayWidget::setSpeaking(bool speaking) {
++  if (speaking) {
++    if (m_mediaIdle.isNull() || !isVisible()) {
++      return;
++    }
++
++    if (!m_speakAnimation) {
++      m_speakAnimation = new QVariantAnimation(this);
++      m_speakAnimation->setStartValue(0.0);
++      m_speakAnimation->setEndValue(TWO_PI);
++      m_speakAnimation->setDuration(SPEAK_ANIM_MS);
++      m_speakAnimation->setLoopCount(-1);
++      m_speakAnimation->setEasingCurve(QEasingCurve::Linear);
++      connect(m_speakAnimation, &QVariantAnimation::valueChanged, this,
++              [this](const QVariant &value) {
++                m_speakPhase = value.toReal();
++                update();
++              });
++    }
++    if (!m_speakGuardTimer) {
++      m_speakGuardTimer = new QTimer(this);
++      m_speakGuardTimer->setSingleShot(true);
++      connect(m_speakGuardTimer, &QTimer::timeout, this,
++              [this]() { setSpeaking(false); });
++    }
++
++    m_speaking = true;
++    if (m_speakAnimation->state() != QAbstractAnimation::Running) {
++      m_speakAnimation->start();
++    }
++    m_speakGuardTimer->start(SPEAK_GUARD_MS);
++    beginMediaPlayback(0);
++  } else {
++    if (!m_speaking) {
++      return;
++    }
++    m_speaking = false;
++    if (m_speakAnimation) {
++      m_speakAnimation->stop();
++    }
++    if (m_speakGuardTimer) {
++      m_speakGuardTimer->stop();
++    }
++    maybeStopMovie();
++    update();
++  }
++}
++
++void OverlayWidget::hideEvent(QHideEvent *event) {
++  QWidget::hideEvent(event);
++  // Don't animate (or decode GIF frames) for a hidden preview.
++  if (m_movie) {
++    m_movie->stop();
++  }
++  if (m_mediaHoldTimer) {
++    m_mediaHoldTimer->stop();
++  }
++  if (m_selectAnimation) {
++    m_selectAnimation->stop();
++  }
++  m_selectProgress = 1.0;
++  if (m_speakAnimation) {
++    m_speakAnimation->stop();
++  }
++  if (m_speakGuardTimer) {
++    m_speakGuardTimer->stop();
++  }
++  m_speaking = false;
++}
++
++void OverlayWidget::drawMedia(QPainter &painter) {
++  if (m_mediaIdle.isNull()) {
++    return;
++  }
++
++  // Same layout function the settings preview uses, so what you see there is
++  // what you get here.
++  const QRectF box =
++      SelectionFx::imageRect(QSizeF(size()), QSizeF(m_mediaIdle.size()),
++                             m_mediaSizePercent, m_mediaPosition, MEDIA_MARGIN);
++  if (box.width() < 8.0 || box.height() < 8.0) {
++    return;
++  }
++
++  const qreal dpr = devicePixelRatioF();
++  QPixmap movieFrame;
++  if (m_movie && m_movie->state() == QMovie::Running) {
++    movieFrame = m_movie->currentPixmap();
++  }
++
++  // Selection animation: quick pop that settles, fading in, plus an
++  // expanding ring. t == 1.0 when idle.
++  const qreal t = m_mediaAnimate ? qBound(0.0, m_selectProgress, 1.0) : 1.0;
++  const qreal settle = 1.0 - t;
++  const qreal scale = 1.0 + 0.22 * settle * settle;
++  const QColor accent = Config::instance().highlightColor();
++
++  painter.save();
++  painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
++  painter.translate(box.center());
++  painter.scale(scale, scale);
++  painter.translate(-box.center());
++  painter.setOpacity(0.35 + 0.65 * t);
++
++  QPainterPath plate;
++  plate.addRoundedRect(box, 6, 6);
++  painter.fillPath(plate, QColor(10, 14, 20, 110));
++
++  if (!movieFrame.isNull()) {
++    painter.drawPixmap(box, movieFrame, QRectF(movieFrame.rect()));
++  } else {
++    // Scale the still image once per size, not on every repaint.
++    const QSize px(qMax(1, qRound(box.width() * dpr)),
++                   qMax(1, qRound(box.height() * dpr)));
++    if (m_mediaIdleScaledPx != px || m_mediaIdleScaled.isNull()) {
++      m_mediaIdleScaled = m_mediaIdle.scaled(px, Qt::IgnoreAspectRatio,
++                                             Qt::SmoothTransformation);
++      m_mediaIdleScaled.setDevicePixelRatio(dpr);
++      m_mediaIdleScaledPx = px;
++    }
++    painter.drawPixmap(box.topLeft(), m_mediaIdleScaled);
++  }
++
++  painter.setBrush(Qt::NoBrush);
++  painter.setPen(QPen(accent, 1.5));
++  painter.drawRoundedRect(box, 6, 6);
++
++  if (settle > 0.0) {
++    QColor ring = accent;
++    ring.setAlpha(int(200.0 * settle));
++    painter.setPen(QPen(ring, 2.0));
++    const qreal grow = 14.0 * t;
++    painter.drawRoundedRect(box.adjusted(-grow, -grow, grow, grow), 8, 8);
++  }
++
++  if (m_speaking) {
++    const qreal pulse = 0.5 + 0.5 * std::sin(m_speakPhase);
++    QColor glow = accent;
++    glow.setAlpha(int(90.0 + 140.0 * pulse));
++    painter.setPen(QPen(glow, 2.0 + 1.5 * pulse));
++    painter.drawRoundedRect(box.adjusted(-2, -2, 2, 2), 8, 8);
++  }
++
++  painter.restore();
++}
++
+ void OverlayWidget::paintEvent(QPaintEvent *) {
+ 
+   QPainter painter(this);
+   painter.setRenderHint(QPainter::Antialiasing);
+ 
++  drawMedia(painter);
+   drawOverlays(painter);
+ 
+   const Config &cfg = Config::instance();
+diff -ruN a/src/voiceplayer.cpp b2/src/voiceplayer.cpp
+--- a/src/voiceplayer.cpp	1970-01-01 00:00:00.000000000 +0000
++++ b2/src/voiceplayer.cpp	2026-10-15 17:30:27.756597382 +0000
+@@ -0,0 +1,114 @@
++#include "voiceplayer.h"
++#include "selectionfx.h"
++#include <QAudioOutput>
++#include <QFileInfo>
++#include <QMediaPlayer>
++#include <QUrl>
++#include <utility>
++
++VoicePlayer::VoicePlayer(QObject *parent) : QObject(parent) { reload(); }
++
++VoicePlayer::~VoicePlayer() { clearVoices(); }
++
++void VoicePlayer::clearVoices() {
++  m_current = nullptr;
++  for (Voice *voice : std::as_const(m_voices)) {
++    voice->player->disconnect(this);
++    voice->player->stop();
++    voice->player->deleteLater();
++    voice->output->deleteLater();
++    delete voice;
++  }
++  m_voices.clear();
++}
++
++void VoicePlayer::reload() {
++  const SelectionFx::Settings fx = SelectionFx::Settings::load();
++  m_mediaFolder = fx.mediaFolder;
++  m_volume = fx.volume;
++
++  clearVoices();
++
++  // Preload every configured clip so the first selection plays without a
++  // loading delay.
++  if (!fx.audioEnabled) {
++    return;
++  }
++  const QStringList characters = SelectionFx::configuredCharacters();
++  for (const QString &name : characters) {
++    const SelectionFx::CharacterMedia media = SelectionFx::characterMedia(name);
++    if (media.audio.isEmpty()) {
++      continue;
++    }
++    const QString file = SelectionFx::resolveMediaPath(m_mediaFolder, media.audio);
++    if (QFileInfo::exists(file)) {
++      voiceFor(file);
++    }
++  }
++}
++
++VoicePlayer::Voice *VoicePlayer::voiceFor(const QString &file) {
++  auto it = m_voices.constFind(file);
++  if (it != m_voices.constEnd()) {
++    return it.value();
++  }
++  if (m_voices.size() >= MAX_VOICES) {
++    return nullptr;
++  }
++
++  auto *voice = new Voice;
++  voice->output = new QAudioOutput(this);
++  voice->player = new QMediaPlayer(this);
++  voice->player->setAudioOutput(voice->output);
++  voice->player->setSource(QUrl::fromLocalFile(file));
++
++  connect(voice->player, &QMediaPlayer::playbackStateChanged, this,
++          [this, voice](QMediaPlayer::PlaybackState state) {
++            if (!voice->owner.isEmpty()) {
++              emit speakingChanged(voice->owner,
++                                   state == QMediaPlayer::PlayingState);
++            }
++          });
++
++  m_voices.insert(file, voice);
++  return voice;
++}
++
++bool VoicePlayer::play(const QString &characterName) {
++  if (characterName.isEmpty()) {
++    return false;
++  }
++  const SelectionFx::CharacterMedia media =
++      SelectionFx::characterMedia(characterName);
++  if (media.audio.isEmpty()) {
++    return false;
++  }
++
++  const QString file = SelectionFx::resolveMediaPath(m_mediaFolder, media.audio);
++  if (!QFileInfo::exists(file)) {
++    return false;
++  }
++
++  Voice *voice = voiceFor(file);
++  if (!voice) {
++    return false;
++  }
++
++  if (m_current && m_current != voice) {
++    m_current->player->stop(); // a new clip cuts off the previous one
++  }
++
++  voice->owner = characterName;
++  voice->output->setVolume(m_volume / 100.0f);
++  voice->player->setPosition(0);
++  voice->player->play();
++
++  m_current = voice;
++  return true;
++}
++
++void VoicePlayer::stop() {
++  if (m_current) {
++    m_current->player->stop();
++  }
++}

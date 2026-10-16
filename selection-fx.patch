@@ -82,16 +82,21 @@ diff -ruN a/include/mainwindow.h b2/include/mainwindow.h
    void updateSnappingLists();
 diff -ruN a/include/selectionfx.h b2/include/selectionfx.h
 --- a/include/selectionfx.h	1970-01-01 00:00:00.000000000 +0000
-+++ b2/include/selectionfx.h	2026-10-15 17:30:27.754625894 +0000
-@@ -0,0 +1,77 @@
++++ b2/include/selectionfx.h	2026-10-16 00:17:41.828483319 +0000
+@@ -0,0 +1,131 @@
 +#ifndef SELECTIONFX_H
 +#define SELECTIONFX_H
 +
 +#include "overlayinfo.h"
++#include <QPointF>
 +#include <QRectF>
 +#include <QSizeF>
 +#include <QString>
 +#include <QStringList>
++
++class QColor;
++class QPainter;
++class QPixmap;
 +
 +/// RTS-style "unit selected" feedback: an image or GIF shown on a client's
 +/// thumbnail (animated when the client is selected) plus an audio clip.
@@ -101,19 +106,31 @@ diff -ruN a/include/selectionfx.h b2/include/selectionfx.h
 +/// user ("media folder").
 +namespace SelectionFx {
 +
-+/// Global options (same for every character).
-+struct Settings {
-+  QString mediaFolder;
-+  bool imageEnabled = true;
-+  int sizePercent = 35; ///< image fits within this % of the preview window
-+  int position = static_cast<int>(OverlayPosition::BottomLeft);
-+  bool animationEnabled = true; ///< pop/fade-in animation on select
-+  bool audioEnabled = true;
-+  int volume = 70; ///< 0-100
-+  bool onlyOnChange = true; ///< ignore re-selecting the active client
++/// Index of the "Custom" entry in the position list (0-8 are the 3x3 presets,
++/// in OverlayPosition order).
++constexpr int PositionCustom = 9;
 +
-+  static Settings load();
-+  void save() const;
++/// Gap kept between the image and the window edge for the 3x3 presets.
++constexpr qreal PresetMargin = 8.0;
++
++/// Everything needed to lay out and draw one character's image.
++struct MediaStyle {
++  OverlayPosition position = OverlayPosition::BottomLeft; ///< used if !custom
++  bool custom = false;
++  QPointF customCenter = QPointF(0.5, 0.5); ///< image centre, 0-1 of the window
++  int sizePercent = 35;  ///< image fits within this % of the window (5-500)
++  int imageOpacity = 100; ///< 0-100
++  bool borderEnabled = false;
++  int borderOpacity = 100; ///< 0-100
++  int popIntensity = 45;   ///< 0 = no pop animation, 100 = strongest
++
++  bool operator==(const MediaStyle &o) const {
++    return position == o.position && custom == o.custom &&
++           customCenter == o.customCenter && sizePercent == o.sizePercent &&
++           imageOpacity == o.imageOpacity && borderEnabled == o.borderEnabled &&
++           borderOpacity == o.borderOpacity && popIntensity == o.popIntensity;
++  }
++  bool operator!=(const MediaStyle &o) const { return !(*this == o); }
 +};
 +
 +/// Per-character media. File names are relative to the media folder (an
@@ -122,10 +139,35 @@ diff -ruN a/include/selectionfx.h b2/include/selectionfx.h
 +  QString image;
 +  QString audio;
 +  int sizePercent = 0; ///< 0 = use Settings::sizePercent
++  bool hasCustomPosition = false;
++  double customX = 0.5; ///< image centre as a fraction of the window width
++  double customY = 0.5; ///< ... and of its height
 +
 +  bool isEmpty() const {
 +    return image.isEmpty() && audio.isEmpty() && sizePercent <= 0;
 +  }
++};
++
++/// Global options (same for every character).
++struct Settings {
++  QString mediaFolder;
++  bool imageEnabled = true;
++  int sizePercent = 35; ///< default image size, % of the preview window
++  int position = static_cast<int>(OverlayPosition::BottomLeft); ///< 0-9
++  int imageOpacity = 100;
++  bool borderEnabled = false;
++  int borderOpacity = 100;
++  int popIntensity = 45; ///< 0 = off
++  bool audioEnabled = true;
++  int volume = 70; ///< 0-100
++  bool onlyOnChange = true; ///< ignore re-selecting the active client
++
++  static Settings load();
++  void save() const;
++
++  /// Style for one character: the global options plus its own size and (when
++  /// the position is "Custom") its own dragged position.
++  MediaStyle styleFor(const CharacterMedia &media) const;
 +};
 +
 +QString defaultMediaFolder();
@@ -151,20 +193,32 @@ diff -ruN a/include/selectionfx.h b2/include/selectionfx.h
 +/// Returns the file name to store, or an empty string on failure.
 +QString importIntoFolder(const QString &folder, const QString &sourcePath);
 +
-+/// Where an image of `imageSize` is drawn inside a preview window of size
-+/// `container`: scaled (aspect ratio kept) to fit within `sizePercent` of the
-+/// container's width and height, anchored on the same 3x3 grid as the text
-+/// overlays. Used by both the real thumbnails and the settings preview.
++/// Preset placement: the image scaled (aspect ratio kept) to fit within
++/// `sizePercent` of the container's width and height, anchored on the same 3x3
++/// grid as the text overlays. The result may be larger than the container; the
++/// part outside it is simply cropped when drawn.
 +QRectF imageRect(const QSizeF &container, const QSizeF &imageSize,
 +                 int sizePercent, OverlayPosition position, qreal margin);
++
++/// Where the image goes for `style` (preset or custom position). Used by both
++/// the real thumbnails and the settings preview, so they always agree.
++QRectF mediaRect(const QSizeF &container, const QSizeF &imageSize,
++                 const MediaStyle &style);
++
++/// Draws `frame` into `box` with the style's opacity, optional border and pop
++/// animation. `popProgress` runs 0 (just selected) to 1 (idle). The caller
++/// clips to the window, so anything outside it is cropped.
++void paintMedia(QPainter &painter, const QRectF &box, const QPixmap &frame,
++                const MediaStyle &style, const QColor &borderColor,
++                qreal popProgress);
 +
 +} // namespace SelectionFx
 +
 +#endif // SELECTIONFX_H
 diff -ruN a/include/selectionfxpage.h b2/include/selectionfxpage.h
 --- a/include/selectionfxpage.h	1970-01-01 00:00:00.000000000 +0000
-+++ b2/include/selectionfxpage.h	2026-10-15 17:13:48.554115944 +0000
-@@ -0,0 +1,131 @@
++++ b2/include/selectionfxpage.h	2026-10-16 00:19:27.936004418 +0000
+@@ -0,0 +1,169 @@
 +#ifndef SELECTIONFXPAGE_H
 +#define SELECTIONFXPAGE_H
 +
@@ -173,6 +227,7 @@ diff -ruN a/include/selectionfxpage.h b2/include/selectionfxpage.h
 +#include <QDateTime>
 +#include <QList>
 +#include <QPixmap>
++#include <QPointF>
 +#include <QString>
 +#include <QStringList>
 +#include <QWidget>
@@ -183,6 +238,7 @@ diff -ruN a/include/selectionfxpage.h b2/include/selectionfxpage.h
 +class QComboBox;
 +class QDragEnterEvent;
 +class QDropEvent;
++class QHideEvent;
 +class QLabel;
 +class QLineEdit;
 +class QMediaPlayer;
@@ -190,33 +246,50 @@ diff -ruN a/include/selectionfxpage.h b2/include/selectionfxpage.h
 +class QMovie;
 +class QPushButton;
 +class QShowEvent;
-+class QHideEvent;
 +class QSlider;
 +class QSpinBox;
 +class QVBoxLayout;
++class QVariantAnimation;
 +
-+/// Mock "preview window" that shows where the selected character's image will
-+/// sit and how large it will be, using the same layout maths as the real
-+/// thumbnails. Animated GIFs play here.
++/// Mock "preview window" showing where the selected character's image sits,
++/// how large it is and how it is cropped, using the same layout and drawing
++/// code as the real thumbnails. Animated GIFs play here, and the image can be
++/// dragged to place it freely.
 +class MediaPreviewBox : public QWidget {
 +public:
 +  explicit MediaPreviewBox(QWidget *parent = nullptr);
 +
 +  void setMedia(const QString &path);
-+  void setLayoutOptions(int sizePercent, OverlayPosition position);
++  void setStyleOptions(const SelectionFx::MediaStyle &style);
++  /// Replays the "selected" pop animation.
++  void playPop();
++
++  /// Called when the user starts dragging the image.
++  std::function<void()> onDragStarted;
++  /// Called while dragging, with the image centre as a fraction (0-1) of the
++  /// preview window's width and height.
++  std::function<void(double, double)> onDragged;
 +
 +protected:
 +  void paintEvent(QPaintEvent *event) override;
 +  void showEvent(QShowEvent *event) override;
 +  void hideEvent(QHideEvent *event) override;
++  void mousePressEvent(QMouseEvent *event) override;
++  void mouseMoveEvent(QMouseEvent *event) override;
++  void mouseReleaseEvent(QMouseEvent *event) override;
 +
 +private:
++  QRectF currentBox() const;
++
 +  QString m_path;
 +  QDateTime m_stamp;
 +  QPixmap m_idle;
 +  QMovie *m_movie = nullptr;
-+  int m_sizePercent = 35;
-+  OverlayPosition m_position = OverlayPosition::BottomLeft;
++  SelectionFx::MediaStyle m_style;
++  QVariantAnimation *m_pop = nullptr;
++  qreal m_popProgress = 1.0;
++  bool m_dragging = false;
++  QPointF m_grabOffset;
 +};
 +
 +/// One character's row in the list: name, image, audio and size override.
@@ -234,6 +307,11 @@ diff -ruN a/include/selectionfxpage.h b2/include/selectionfxpage.h
 +  QPushButton *audioPlay = nullptr;
 +  QSpinBox *sizeSpin = nullptr;
 +  QPushButton *deleteButton = nullptr;
++
++  // Custom (dragged) position: image centre as a fraction of the window.
++  bool hasCustom = false;
++  double customX = 0.5;
++  double customY = 0.5;
 +
 +  std::function<void(const QStringList &)> onFilesDropped;
 +  std::function<void()> onClicked;
@@ -273,13 +351,26 @@ diff -ruN a/include/selectionfxpage.h b2/include/selectionfxpage.h
 +  void addFromOpenWindows();
 +  void playTest(MediaRow *row);
 +
++  bool isCustomPosition() const;
++  SelectionFx::MediaStyle styleForRow(const MediaRow *row) const;
++  QSizeF imageSizeFor(const MediaRow *row) const;
++  void seedCustom(MediaRow *row, OverlayPosition from);
++  void seedCustomPositions();
++
 +  QLineEdit *m_folderEdit = nullptr;
 +  QCheckBox *m_onlyOnChangeCheck = nullptr;
 +  QCheckBox *m_imageCheck = nullptr;
 +  QSlider *m_sizeSlider = nullptr;
 +  QLabel *m_sizeValue = nullptr;
 +  QComboBox *m_positionCombo = nullptr;
-+  QCheckBox *m_animateCheck = nullptr;
++  QSlider *m_opacitySlider = nullptr;
++  QLabel *m_opacityValue = nullptr;
++  QCheckBox *m_borderCheck = nullptr;
++  QSlider *m_borderOpacitySlider = nullptr;
++  QLabel *m_borderOpacityValue = nullptr;
++  QSlider *m_popSlider = nullptr;
++  QLabel *m_popValue = nullptr;
++  QPushButton *m_popButton = nullptr;
 +  QCheckBox *m_audioCheck = nullptr;
 +  QSlider *m_volumeSlider = nullptr;
 +  QLabel *m_volumeValue = nullptr;
@@ -290,6 +381,7 @@ diff -ruN a/include/selectionfxpage.h b2/include/selectionfxpage.h
 +  QVBoxLayout *m_rowsLayout = nullptr;
 +  QList<MediaRow *> m_rows;
 +  MediaRow *m_selectedRow = nullptr;
++  int m_lastPreset = static_cast<int>(OverlayPosition::BottomLeft);
 +
 +  QMediaPlayer *m_testPlayer = nullptr;
 +  QAudioOutput *m_testOutput = nullptr;
@@ -298,8 +390,16 @@ diff -ruN a/include/selectionfxpage.h b2/include/selectionfxpage.h
 +#endif // SELECTIONFXPAGE_H
 diff -ruN a/include/thumbnailwidget.h b2/include/thumbnailwidget.h
 --- a/include/thumbnailwidget.h	2026-10-15 14:26:00.223868396 +0000
-+++ b2/include/thumbnailwidget.h	2026-10-15 17:14:31.222699985 +0000
-@@ -14,6 +14,8 @@
++++ b2/include/thumbnailwidget.h	2026-10-16 00:18:47.019497059 +0000
+@@ -3,6 +3,7 @@
+ 
+ #include "borderstyle.h"
+ #include "overlayinfo.h"
++#include "selectionfx.h"
+ #include <QDateTime>
+ #include <QLabel>
+ #include <QList>
+@@ -14,6 +15,8 @@
  #include <windows.h>
  
  class OverlayWidget;
@@ -308,29 +408,30 @@ diff -ruN a/include/thumbnailwidget.h b2/include/thumbnailwidget.h
  
  /// Represents a single combat event with its own lifecycle
  struct CombatEvent {
-@@ -58,6 +60,14 @@
+@@ -58,6 +61,15 @@
    QString getCombatEventType() const;
    QStringList getActiveCombatEventTypes() const;
  
-+  /// Re-reads this character's image/GIF from the settings and passes it to
-+  /// the overlay. Called from updateOverlays().
++  /// Re-reads this character's image/GIF and style from the settings and
++  /// passes them to the overlay. Called from updateOverlays().
 +  void refreshMedia();
-+  /// Plays the "selected" animation (and starts a GIF).
++  /// Plays the "selected" pop animation (and starts a GIF).
 +  void playSelectEffect();
-+  /// Marks the character as speaking while its audio clip plays.
++  /// Marks the character as speaking while its audio clip plays (keeps a GIF
++  /// running).
 +  void setSpeaking(bool speaking);
 +
    void forceUpdate();
    void updateWindowFlags(bool alwaysOnTop);
    void forceOverlayRender();
-@@ -143,8 +153,16 @@
+@@ -143,8 +155,16 @@
    void pauseAnimations();
    void resumeAnimations();
  
 +  // Selection feedback: image / GIF shown on the preview
 +  void setMedia(const QString &path);
 +  void clearMedia() { setMedia(QString()); }
-+  void setMediaStyle(OverlayPosition position, int sizePercent, bool animate);
++  void setMediaStyle(const SelectionFx::MediaStyle &style);
 +  void playSelectAnimation();
 +  void setSpeaking(bool speaking);
 +
@@ -340,7 +441,7 @@ diff -ruN a/include/thumbnailwidget.h b2/include/thumbnailwidget.h
  
  private:
    QVector<OverlayElement> m_overlays;
-@@ -161,6 +179,26 @@
+@@ -161,6 +181,22 @@
    qreal m_animationPhase = 0.0;
    bool m_animationsPaused = false;
  
@@ -351,14 +452,10 @@ diff -ruN a/include/thumbnailwidget.h b2/include/thumbnailwidget.h
 +  QSize m_mediaIdleScaledPx;
 +  QMovie *m_movie = nullptr; // only for animated images
 +  QTimer *m_mediaHoldTimer = nullptr;
-+  OverlayPosition m_mediaPosition = OverlayPosition::BottomLeft;
-+  int m_mediaSizePercent = 35;
-+  bool m_mediaAnimate = true;
-+  QVariantAnimation *m_selectAnimation = nullptr;
-+  QVariantAnimation *m_speakAnimation = nullptr;
 +  QTimer *m_speakGuardTimer = nullptr;
++  QVariantAnimation *m_selectAnimation = nullptr;
++  SelectionFx::MediaStyle m_style;
 +  qreal m_selectProgress = 1.0; // 0 = just selected, 1 = idle
-+  qreal m_speakPhase = 0.0;
 +  bool m_speaking = false;
 +  void drawMedia(QPainter &painter);
 +  void beginMediaPlayback(int holdMs);
@@ -618,15 +715,18 @@ diff -ruN a/src/mainwindow.cpp b2/src/mainwindow.cpp
        HWND hwnd = it.key();
 diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
 --- a/src/selectionfx.cpp	1970-01-01 00:00:00.000000000 +0000
-+++ b2/src/selectionfx.cpp	2026-10-15 17:30:27.755352169 +0000
-@@ -0,0 +1,231 @@
++++ b2/src/selectionfx.cpp	2026-10-16 00:18:11.412063180 +0000
+@@ -0,0 +1,353 @@
 +#include "selectionfx.h"
 +#include "config.h"
++#include <QColor>
 +#include <QCoreApplication>
 +#include <QDir>
 +#include <QFile>
 +#include <QFileInfo>
-+#include <QSet>
++#include <QPainter>
++#include <QPen>
++#include <QPixmap>
 +#include <QtGlobal>
 +
 +namespace SelectionFx {
@@ -636,11 +736,19 @@ diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
 +constexpr const char *KEY_IMAGE_ENABLED = "selectionFx/imageEnabled";
 +constexpr const char *KEY_SIZE_PERCENT = "selectionFx/sizePercent";
 +constexpr const char *KEY_POSITION = "selectionFx/position";
-+constexpr const char *KEY_ANIMATION = "selectionFx/animationEnabled";
++constexpr const char *KEY_IMAGE_OPACITY = "selectionFx/imageOpacity";
++constexpr const char *KEY_BORDER_ENABLED = "selectionFx/borderEnabled";
++constexpr const char *KEY_BORDER_OPACITY = "selectionFx/borderOpacity";
++constexpr const char *KEY_POP_INTENSITY = "selectionFx/popIntensity";
 +constexpr const char *KEY_AUDIO_ENABLED = "selectionFx/audioEnabled";
 +constexpr const char *KEY_VOLUME = "selectionFx/volume";
 +constexpr const char *KEY_ONLY_ON_CHANGE = "selectionFx/onlyOnChange";
++// Older builds stored the pop animation as an on/off checkbox.
++constexpr const char *KEY_LEGACY_ANIMATION = "selectionFx/animationEnabled";
 +constexpr const char *GROUP_CHARACTERS = "characterMedia";
++
++constexpr int MIN_SIZE_PERCENT = 5;
++constexpr int MAX_SIZE_PERCENT = 500;
 +
 +QString characterKey(const QString &characterName) {
 +  return QStringLiteral("characterMedia/") + characterName;
@@ -650,6 +758,14 @@ diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
 +bool samePath(const QString &a, const QString &b) {
 +  return QString::compare(QDir::cleanPath(a), QDir::cleanPath(b),
 +                          Qt::CaseInsensitive) == 0;
++}
++
++QSizeF fitSize(const QSizeF &container, const QSizeF &imageSize,
++               int sizePercent) {
++  const qreal fraction =
++      qBound(MIN_SIZE_PERCENT, sizePercent, MAX_SIZE_PERCENT) / 100.0;
++  const QSizeF box(container.width() * fraction, container.height() * fraction);
++  return imageSize.scaled(box, Qt::KeepAspectRatio);
 +}
 +} // namespace
 +
@@ -667,9 +783,21 @@ diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
 +    s.mediaFolder = defaultMediaFolder();
 +  }
 +  s.imageEnabled = cfg.customValue(KEY_IMAGE_ENABLED, true).toBool();
-+  s.sizePercent = qBound(5, cfg.customValue(KEY_SIZE_PERCENT, 35).toInt(), 100);
-+  s.position = qBound(0, cfg.customValue(KEY_POSITION, s.position).toInt(), 8);
-+  s.animationEnabled = cfg.customValue(KEY_ANIMATION, true).toBool();
++  s.sizePercent = qBound(MIN_SIZE_PERCENT,
++                         cfg.customValue(KEY_SIZE_PERCENT, 35).toInt(),
++                         MAX_SIZE_PERCENT);
++  s.position =
++      qBound(0, cfg.customValue(KEY_POSITION, s.position).toInt(), PositionCustom);
++  s.imageOpacity = qBound(0, cfg.customValue(KEY_IMAGE_OPACITY, 100).toInt(), 100);
++  s.borderEnabled = cfg.customValue(KEY_BORDER_ENABLED, false).toBool();
++  s.borderOpacity = qBound(0, cfg.customValue(KEY_BORDER_OPACITY, 100).toInt(), 100);
++
++  s.popIntensity = qBound(0, cfg.customValue(KEY_POP_INTENSITY, 45).toInt(), 100);
++  if (!cfg.customValue(KEY_POP_INTENSITY).isValid() &&
++      !cfg.customValue(KEY_LEGACY_ANIMATION, true).toBool()) {
++    s.popIntensity = 0; // the old checkbox was switched off
++  }
++
 +  s.audioEnabled = cfg.customValue(KEY_AUDIO_ENABLED, true).toBool();
 +  s.volume = qBound(0, cfg.customValue(KEY_VOLUME, 70).toInt(), 100);
 +  s.onlyOnChange = cfg.customValue(KEY_ONLY_ON_CHANGE, true).toBool();
@@ -682,10 +810,34 @@ diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
 +  cfg.setCustomValue(KEY_IMAGE_ENABLED, imageEnabled);
 +  cfg.setCustomValue(KEY_SIZE_PERCENT, sizePercent);
 +  cfg.setCustomValue(KEY_POSITION, position);
-+  cfg.setCustomValue(KEY_ANIMATION, animationEnabled);
++  cfg.setCustomValue(KEY_IMAGE_OPACITY, imageOpacity);
++  cfg.setCustomValue(KEY_BORDER_ENABLED, borderEnabled);
++  cfg.setCustomValue(KEY_BORDER_OPACITY, borderOpacity);
++  cfg.setCustomValue(KEY_POP_INTENSITY, popIntensity);
 +  cfg.setCustomValue(KEY_AUDIO_ENABLED, audioEnabled);
 +  cfg.setCustomValue(KEY_VOLUME, volume);
 +  cfg.setCustomValue(KEY_ONLY_ON_CHANGE, onlyOnChange);
++}
++
++MediaStyle Settings::styleFor(const CharacterMedia &media) const {
++  MediaStyle style;
++  style.sizePercent = media.sizePercent > 0 ? media.sizePercent : sizePercent;
++  style.imageOpacity = imageOpacity;
++  style.borderEnabled = borderEnabled;
++  style.borderOpacity = borderOpacity;
++  style.popIntensity = popIntensity;
++
++  if (position == PositionCustom) {
++    if (media.hasCustomPosition) {
++      style.custom = true;
++      style.customCenter = QPointF(media.customX, media.customY);
++    } else {
++      style.position = OverlayPosition::BottomLeft; // never positioned yet
++    }
++  } else {
++    style.position = static_cast<OverlayPosition>(position);
++  }
++  return style;
 +}
 +
 +CharacterMedia characterMedia(const QString &characterName) {
@@ -699,7 +851,15 @@ diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
 +  media.audio = cfg.customValue(base + QStringLiteral("audio")).toString();
 +  media.sizePercent =
 +      qBound(0, cfg.customValue(base + QStringLiteral("sizePercent"), 0).toInt(),
-+             100);
++             MAX_SIZE_PERCENT);
++
++  const QVariant x = cfg.customValue(base + QStringLiteral("customX"));
++  const QVariant y = cfg.customValue(base + QStringLiteral("customY"));
++  if (x.isValid() && y.isValid()) {
++    media.hasCustomPosition = true;
++    media.customX = qBound(0.0, x.toDouble(), 1.0);
++    media.customY = qBound(0.0, y.toDouble(), 1.0);
++  }
 +  return media;
 +}
 +
@@ -713,6 +873,10 @@ diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
 +  cfg.setCustomValue(base + QStringLiteral("image"), media.image);
 +  cfg.setCustomValue(base + QStringLiteral("audio"), media.audio);
 +  cfg.setCustomValue(base + QStringLiteral("sizePercent"), media.sizePercent);
++  if (media.hasCustomPosition) {
++    cfg.setCustomValue(base + QStringLiteral("customX"), media.customX);
++    cfg.setCustomValue(base + QStringLiteral("customY"), media.customY);
++  }
 +}
 +
 +void removeCharacterMedia(const QString &characterName) {
@@ -817,15 +981,12 @@ diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
 +    return QRectF();
 +  }
 +
-+  const qreal fraction = qBound(5, sizePercent, 100) / 100.0;
-+  QSizeF box(container.width() * fraction, container.height() * fraction);
-+  box.setWidth(qMin(box.width(), container.width() - 2 * margin));
-+  box.setHeight(qMin(box.height(), container.height() - 2 * margin));
-+  if (box.width() < 1.0 || box.height() < 1.0) {
++  // No clamping to the container: an image bigger than the window is allowed
++  // and gets cropped by the window edge when drawn.
++  const QSizeF size = fitSize(container, imageSize, sizePercent);
++  if (size.width() < 1.0 || size.height() < 1.0) {
 +    return QRectF();
 +  }
-+
-+  const QSizeF size = imageSize.scaled(box, Qt::KeepAspectRatio);
 +
 +  const qreal left = margin;
 +  const qreal centerX = (container.width() - size.width()) / 2.0;
@@ -850,11 +1011,69 @@ diff -ruN a/src/selectionfx.cpp b2/src/selectionfx.cpp
 +  return QRectF(QPointF(x, y), size);
 +}
 +
++QRectF mediaRect(const QSizeF &container, const QSizeF &imageSize,
++                 const MediaStyle &style) {
++  if (!style.custom) {
++    return imageRect(container, imageSize, style.sizePercent, style.position,
++                     PresetMargin);
++  }
++
++  if (container.isEmpty() || imageSize.isEmpty()) {
++    return QRectF();
++  }
++  const QSizeF size = fitSize(container, imageSize, style.sizePercent);
++  if (size.width() < 1.0 || size.height() < 1.0) {
++    return QRectF();
++  }
++  const QPointF center(qBound(0.0, style.customCenter.x(), 1.0) * container.width(),
++                       qBound(0.0, style.customCenter.y(), 1.0) * container.height());
++  return QRectF(QPointF(center.x() - size.width() / 2.0,
++                        center.y() - size.height() / 2.0),
++                size);
++}
++
++void paintMedia(QPainter &painter, const QRectF &box, const QPixmap &frame,
++                const MediaStyle &style, const QColor &borderColor,
++                qreal popProgress) {
++  if (frame.isNull() || box.isEmpty()) {
++    return;
++  }
++
++  // Pop animation: the image starts larger and more transparent, then settles.
++  const qreal intensity = qBound(0, style.popIntensity, 100) / 100.0;
++  const qreal settle = 1.0 - qBound(0.0, popProgress, 1.0);
++  const qreal scale = 1.0 + 0.5 * intensity * settle * settle;
++  const qreal fade = 1.0 - qMin(1.0, intensity * 1.5) * settle;
++
++  const qreal imageOpacity = qBound(0, style.imageOpacity, 100) / 100.0;
++  const qreal borderOpacity = qBound(0, style.borderOpacity, 100) / 100.0;
++
++  painter.save();
++  painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
++  painter.translate(box.center());
++  painter.scale(scale, scale);
++  painter.translate(-box.center());
++
++  painter.setOpacity(imageOpacity * fade);
++  painter.drawPixmap(box, frame, QRectF(frame.rect()));
++
++  if (style.borderEnabled) {
++    QColor color = borderColor;
++    color.setAlpha(255); // opacity comes from the painter
++    painter.setOpacity(borderOpacity * fade);
++    painter.setBrush(Qt::NoBrush);
++    painter.setPen(QPen(color, 2.0));
++    painter.drawRect(box.adjusted(1.0, 1.0, -1.0, -1.0));
++  }
++
++  painter.restore();
++}
++
 +} // namespace SelectionFx
 diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 --- a/src/selectionfxpage.cpp	1970-01-01 00:00:00.000000000 +0000
-+++ b2/src/selectionfxpage.cpp	2026-10-15 17:30:27.757188799 +0000
-@@ -0,0 +1,919 @@
++++ b2/src/selectionfxpage.cpp	2026-10-16 00:21:08.154742694 +0000
+@@ -0,0 +1,1160 @@
 +#include "selectionfxpage.h"
 +#include "config.h"
 +#include "overlayinfo.h"
@@ -891,11 +1110,13 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +#include <QSpinBox>
 +#include <QUrl>
 +#include <QVBoxLayout>
++#include <QVariantAnimation>
 +#include <utility>
 +
 +namespace {
 +
 +constexpr int MAX_IMAGE_DIM = 512;
++constexpr int POP_DURATION_MS = 450; // keep in sync with the real thumbnails
 +
 +QString rowStyle(bool selected) {
 +  return QStringLiteral("QWidget#mediaRow { background-color: #2a2a2a; "
@@ -927,6 +1148,28 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  return label;
 +}
 +
++// "Label  [=====o-----]  45%" row. The caller connects the slider.
++QHBoxLayout *makeSliderRow(const QString &text, QSlider *&slider,
++                           QLabel *&valueLabel, int min, int max) {
++  auto *row = new QHBoxLayout();
++  auto *label = new QLabel(text);
++  label->setStyleSheet(StyleSheet::getLabelStyleSheet());
++  label->setFixedWidth(110);
++  slider = new QSlider(Qt::Horizontal);
++  slider->setRange(min, max);
++  slider->setFixedWidth(180);
++  valueLabel = new QLabel();
++  valueLabel->setStyleSheet(StyleSheet::getLabelStyleSheet());
++  valueLabel->setFixedWidth(48);
++  row->addWidget(label);
++  row->addWidget(slider);
++  row->addWidget(valueLabel);
++  row->addStretch();
++  return row;
++}
++
++QString percentText(int value) { return QStringLiteral("%1%").arg(value); }
++
 +} // namespace
 +
 +// ---------------------------------------------------------------------------
@@ -935,16 +1178,47 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +
 +MediaPreviewBox::MediaPreviewBox(QWidget *parent) : QWidget(parent) {
 +  setMinimumSize(160, 90);
++  setMouseTracking(true);
 +}
 +
-+void MediaPreviewBox::setLayoutOptions(int sizePercent,
-+                                       OverlayPosition position) {
-+  if (m_sizePercent == sizePercent && m_position == position) {
++void MediaPreviewBox::setStyleOptions(const SelectionFx::MediaStyle &style) {
++  if (m_style == style) {
 +    return;
 +  }
-+  m_sizePercent = sizePercent;
-+  m_position = position;
++  m_style = style;
 +  update();
++}
++
++void MediaPreviewBox::playPop() {
++  if (m_idle.isNull() || m_style.popIntensity <= 0) {
++    return;
++  }
++  if (!m_pop) {
++    m_pop = new QVariantAnimation(this);
++    m_pop->setStartValue(0.0);
++    m_pop->setEndValue(1.0);
++    m_pop->setDuration(POP_DURATION_MS);
++    m_pop->setEasingCurve(QEasingCurve::Linear);
++    connect(m_pop, &QVariantAnimation::valueChanged, this,
++            [this](const QVariant &value) {
++              m_popProgress = value.toReal();
++              update();
++            });
++    connect(m_pop, &QVariantAnimation::finished, this, [this]() {
++      m_popProgress = 1.0;
++      update();
++    });
++  }
++  m_pop->stop();
++  m_popProgress = 0.0;
++  m_pop->start();
++}
++
++QRectF MediaPreviewBox::currentBox() const {
++  if (m_idle.isNull()) {
++    return QRectF();
++  }
++  return SelectionFx::mediaRect(QSizeF(size()), QSizeF(m_idle.size()), m_style);
 +}
 +
 +void MediaPreviewBox::setMedia(const QString &path) {
@@ -1006,15 +1280,57 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  }
 +}
 +
++void MediaPreviewBox::mousePressEvent(QMouseEvent *event) {
++  if (event->button() == Qt::LeftButton) {
++    const QRectF box = currentBox();
++    if (!box.isEmpty() && box.contains(event->position())) {
++      m_dragging = true;
++      m_grabOffset = event->position() - box.center();
++      setCursor(Qt::ClosedHandCursor);
++      if (onDragStarted) {
++        onDragStarted();
++      }
++      return;
++    }
++  }
++  QWidget::mousePressEvent(event);
++}
++
++void MediaPreviewBox::mouseMoveEvent(QMouseEvent *event) {
++  if (m_dragging) {
++    const QPointF center = event->position() - m_grabOffset;
++    const double fx = qBound(0.0, center.x() / width(), 1.0);
++    const double fy = qBound(0.0, center.y() / height(), 1.0);
++    if (onDragged) {
++      onDragged(fx, fy);
++    }
++    return;
++  }
++
++  const QRectF box = currentBox();
++  const bool overImage = !box.isEmpty() && box.contains(event->position());
++  setCursor(overImage ? Qt::OpenHandCursor : Qt::ArrowCursor);
++  QWidget::mouseMoveEvent(event);
++}
++
++void MediaPreviewBox::mouseReleaseEvent(QMouseEvent *event) {
++  if (m_dragging) {
++    m_dragging = false;
++    setCursor(Qt::OpenHandCursor);
++    return;
++  }
++  QWidget::mouseReleaseEvent(event);
++}
++
 +void MediaPreviewBox::paintEvent(QPaintEvent *) {
 +  QPainter painter(this);
 +  painter.setRenderHint(QPainter::Antialiasing);
 +  painter.setRenderHint(QPainter::SmoothPixmapTransform);
 +
 +  const QRectF bounds = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
-+  painter.setPen(QPen(QColor(0x3a, 0x3a, 0x3a), 1));
-+  painter.setBrush(QColor(20, 24, 30));
-+  painter.drawRoundedRect(bounds, 4, 4);
++  QPainterPath windowShape;
++  windowShape.addRoundedRect(bounds, 4, 4);
++  painter.fillPath(windowShape, QColor(20, 24, 30));
 +
 +  painter.setPen(QColor(255, 255, 255, 45));
 +  painter.drawText(bounds.adjusted(0, 6, 0, 0), Qt::AlignHCenter | Qt::AlignTop,
@@ -1024,31 +1340,30 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +    painter.setPen(QColor(150, 150, 150));
 +    painter.drawText(bounds, Qt::AlignCenter,
 +                     QStringLiteral("No image selected"));
-+    return;
++  } else {
++    const QRectF box = currentBox();
++    if (!box.isEmpty()) {
++      QPixmap frame;
++      if (m_movie && m_movie->state() == QMovie::Running) {
++        frame = m_movie->currentPixmap();
++      }
++      if (frame.isNull()) {
++        frame = m_idle;
++      }
++
++      painter.save();
++      painter.setClipPath(windowShape); // the window edge crops the image
++      SelectionFx::paintMedia(painter, box, frame, m_style,
++                              Config::instance().highlightColor(),
++                              m_popProgress);
++      painter.restore();
++    }
 +  }
 +
-+  const QRectF box = SelectionFx::imageRect(QSizeF(size()), QSizeF(m_idle.size()),
-+                                            m_sizePercent, m_position, 8.0);
-+  if (box.isEmpty()) {
-+    return;
-+  }
-+
-+  QPainterPath plate;
-+  plate.addRoundedRect(box, 6, 6);
-+  painter.fillPath(plate, QColor(10, 14, 20, 110));
-+
-+  QPixmap frame;
-+  if (m_movie && m_movie->state() == QMovie::Running) {
-+    frame = m_movie->currentPixmap();
-+  }
-+  if (frame.isNull()) {
-+    frame = m_idle;
-+  }
-+  painter.drawPixmap(box, frame, QRectF(frame.rect()));
-+
++  // Window outline, drawn last so it stays crisp over a cropped image.
 +  painter.setBrush(Qt::NoBrush);
-+  painter.setPen(QPen(Config::instance().highlightColor(), 1.5));
-+  painter.drawRoundedRect(box, 6, 6);
++  painter.setPen(QPen(QColor(0x3a, 0x3a, 0x3a), 1));
++  painter.drawRoundedRect(bounds, 4, 4);
 +}
 +
 +// ---------------------------------------------------------------------------
@@ -1145,7 +1460,7 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  folderRow->setSpacing(8);
 +  auto *folderLabel = new QLabel(QStringLiteral("Media folder:"));
 +  folderLabel->setStyleSheet(StyleSheet::getLabelStyleSheet());
-+  folderLabel->setFixedWidth(100);
++  folderLabel->setFixedWidth(110);
 +  m_folderEdit = new QLineEdit();
 +  m_folderEdit->setStyleSheet(StyleSheet::getTableCellEditorStyleSheet());
 +  auto *browseFolderButton = new QPushButton(QStringLiteral("Browse..."));
@@ -1180,11 +1495,15 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  // ---- Image --------------------------------------------------------------
 +  QVBoxLayout *imageSection = makeSection(
 +      QStringLiteral("Image Size and Position"),
-+      QStringLiteral("The image is scaled to fit within this percentage of the "
-+                     "preview window's width and height (its proportions are "
-+                     "kept). The preview on the right shows the result for the "
-+                     "selected character."),
-+      {"image", "gif", "size", "scale", "position", "preview", "animation"});
++      QStringLiteral(
++          "The image is scaled to fit within this percentage of the preview "
++          "window's width and height (proportions kept). Sizes above 100% are "
++          "allowed: whatever sticks out past the window's edge is cropped. "
++          "Drag the image in the preview to place it anywhere. That switches "
++          "Position to Custom and is remembered per character."),
++      {"image", "gif", "size", "scale", "position", "preview", "animation",
++       "opacity", "transparency", "border", "pop", "intensity", "custom",
++       "drag", "crop"});
 +
 +  auto *imageColumns = new QHBoxLayout();
 +  imageColumns->setSpacing(16);
@@ -1196,44 +1515,52 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  m_imageCheck->setStyleSheet(StyleSheet::getCheckBoxStyleSheet());
 +  controls->addWidget(m_imageCheck);
 +
-+  auto *sizeRow = new QHBoxLayout();
-+  auto *sizeLabel = new QLabel(QStringLiteral("Default size:"));
-+  sizeLabel->setStyleSheet(StyleSheet::getLabelStyleSheet());
-+  sizeLabel->setFixedWidth(100);
-+  m_sizeSlider = new QSlider(Qt::Horizontal);
-+  m_sizeSlider->setRange(5, 100);
-+  m_sizeSlider->setFixedWidth(180);
-+  m_sizeValue = new QLabel(QStringLiteral("35%"));
-+  m_sizeValue->setStyleSheet(StyleSheet::getLabelStyleSheet());
-+  m_sizeValue->setFixedWidth(44);
-+  sizeRow->addWidget(sizeLabel);
-+  sizeRow->addWidget(m_sizeSlider);
-+  sizeRow->addWidget(m_sizeValue);
-+  sizeRow->addStretch();
-+  controls->addLayout(sizeRow);
++  controls->addLayout(
++      makeSliderRow(QStringLiteral("Default size:"), m_sizeSlider, m_sizeValue,
++                    5, 500));
 +
 +  auto *positionRow = new QHBoxLayout();
 +  auto *positionLabel = new QLabel(QStringLiteral("Position:"));
 +  positionLabel->setStyleSheet(StyleSheet::getLabelStyleSheet());
-+  positionLabel->setFixedWidth(100);
++  positionLabel->setFixedWidth(110);
 +  m_positionCombo = new QComboBox();
 +  m_positionCombo->setStyleSheet(StyleSheet::getComboBoxStyleSheet());
-+  m_positionCombo->setFixedWidth(180);
++  m_positionCombo->setMinimumWidth(200);
 +  const QStringList positions = {"Top Left",    "Top Center",   "Top Right",
 +                                 "Center Left", "Center",       "Center Right",
 +                                 "Bottom Left", "Bottom Center", "Bottom Right"};
 +  for (int i = 0; i < positions.size(); ++i) {
 +    m_positionCombo->addItem(positions.at(i), i);
 +  }
++  m_positionCombo->addItem(QStringLiteral("Custom (drag in preview)"),
++                           SelectionFx::PositionCustom);
 +  positionRow->addWidget(positionLabel);
 +  positionRow->addWidget(m_positionCombo);
 +  positionRow->addStretch();
 +  controls->addLayout(positionRow);
 +
-+  m_animateCheck = new QCheckBox(
-+      QStringLiteral("Pop animation when a client is selected"));
-+  m_animateCheck->setStyleSheet(StyleSheet::getCheckBoxStyleSheet());
-+  controls->addWidget(m_animateCheck);
++  controls->addLayout(makeSliderRow(QStringLiteral("Image opacity:"),
++                                    m_opacitySlider, m_opacityValue, 0, 100));
++
++  m_borderCheck = new QCheckBox(
++      QStringLiteral("Show a border around the image (uses the Highlight color)"));
++  m_borderCheck->setStyleSheet(StyleSheet::getCheckBoxStyleSheet());
++  controls->addWidget(m_borderCheck);
++
++  controls->addLayout(makeSliderRow(QStringLiteral("Border opacity:"),
++                                    m_borderOpacitySlider, m_borderOpacityValue,
++                                    0, 100));
++
++  QHBoxLayout *popRow = makeSliderRow(QStringLiteral("Pop intensity:"),
++                                      m_popSlider, m_popValue, 0, 100);
++  m_popButton = new QPushButton(QStringLiteral("Play"));
++  m_popButton->setStyleSheet(StyleSheet::getButtonStyleSheet());
++  m_popButton->setAutoDefault(false);
++  m_popButton->setCursor(Qt::PointingHandCursor);
++  m_popButton->setToolTip(
++      QStringLiteral("Replay the pop animation in the preview"));
++  popRow->insertWidget(popRow->count() - 1, m_popButton);
++  controls->addLayout(popRow);
 +  controls->addStretch();
 +
 +  auto *previewColumn = new QVBoxLayout();
@@ -1242,6 +1569,7 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  m_previewCaption = new QLabel();
 +  m_previewCaption->setStyleSheet(StyleSheet::getInfoLabelStyleSheet());
 +  m_previewCaption->setWordWrap(true);
++  m_previewCaption->setFixedWidth(320);
 +  previewColumn->addWidget(m_preview);
 +  previewColumn->addWidget(m_previewCaption);
 +  previewColumn->addStretch();
@@ -1250,12 +1578,70 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  imageColumns->addLayout(previewColumn);
 +  imageSection->addLayout(imageColumns);
 +
++  // Sliders: keep the value labels current and redraw the preview.
 +  connect(m_sizeSlider, &QSlider::valueChanged, this, [this](int value) {
-+    m_sizeValue->setText(QStringLiteral("%1%").arg(value));
++    m_sizeValue->setText(percentText(value));
 +    updatePreview();
 +  });
++  connect(m_opacitySlider, &QSlider::valueChanged, this, [this](int value) {
++    m_opacityValue->setText(percentText(value));
++    updatePreview();
++  });
++  connect(m_borderOpacitySlider, &QSlider::valueChanged, this,
++          [this](int value) {
++            m_borderOpacityValue->setText(percentText(value));
++            updatePreview();
++          });
++  connect(m_popSlider, &QSlider::valueChanged, this, [this](int value) {
++    m_popValue->setText(value == 0 ? QStringLiteral("Off") : percentText(value));
++    updatePreview();
++  });
++  connect(m_popSlider, &QSlider::sliderReleased, this,
++          [this]() { m_preview->playPop(); });
++  connect(m_popButton, &QPushButton::clicked, this,
++          [this]() { m_preview->playPop(); });
++  connect(m_borderCheck, &QCheckBox::toggled, this, [this](bool on) {
++    m_borderOpacitySlider->setEnabled(on);
++    updatePreview();
++  });
++
++  // Position: switching to Custom keeps every image exactly where it is now.
 +  connect(m_positionCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-+          this, [this](int) { updatePreview(); });
++          this, [this](int) {
++            const int position = m_positionCombo->currentData().toInt();
++            if (position == SelectionFx::PositionCustom) {
++              seedCustomPositions();
++            } else {
++              m_lastPreset = position;
++            }
++            updatePreview();
++          });
++
++  // Dragging the image in the preview.
++  m_preview->onDragStarted = [this]() {
++    if (!m_selectedRow) {
++      return;
++    }
++    if (!isCustomPosition()) {
++      seedCustomPositions(); // other characters stay where they are
++      const QSignalBlocker blocker(m_positionCombo);
++      m_positionCombo->setCurrentIndex(
++          m_positionCombo->findData(SelectionFx::PositionCustom));
++    }
++    if (!m_selectedRow->hasCustom) {
++      seedCustom(m_selectedRow, static_cast<OverlayPosition>(m_lastPreset));
++    }
++    updatePreview();
++  };
++  m_preview->onDragged = [this](double fx, double fy) {
++    if (!m_selectedRow) {
++      return;
++    }
++    m_selectedRow->hasCustom = true;
++    m_selectedRow->customX = fx;
++    m_selectedRow->customY = fy;
++    updatePreview();
++  };
 +
 +  // ---- Audio --------------------------------------------------------------
 +  QVBoxLayout *audioSection = makeSection(
@@ -1269,25 +1655,10 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  m_audioCheck->setStyleSheet(StyleSheet::getCheckBoxStyleSheet());
 +  audioSection->addWidget(m_audioCheck);
 +
-+  auto *volumeRow = new QHBoxLayout();
-+  auto *volumeLabel = new QLabel(QStringLiteral("Volume:"));
-+  volumeLabel->setStyleSheet(StyleSheet::getLabelStyleSheet());
-+  volumeLabel->setFixedWidth(100);
-+  m_volumeSlider = new QSlider(Qt::Horizontal);
-+  m_volumeSlider->setRange(0, 100);
-+  m_volumeSlider->setFixedWidth(180);
-+  m_volumeValue = new QLabel(QStringLiteral("70%"));
-+  m_volumeValue->setStyleSheet(StyleSheet::getLabelStyleSheet());
-+  m_volumeValue->setFixedWidth(44);
-+  volumeRow->addWidget(volumeLabel);
-+  volumeRow->addWidget(m_volumeSlider);
-+  volumeRow->addWidget(m_volumeValue);
-+  volumeRow->addStretch();
-+  audioSection->addLayout(volumeRow);
-+
-+  connect(m_volumeSlider, &QSlider::valueChanged, this, [this](int value) {
-+    m_volumeValue->setText(QStringLiteral("%1%").arg(value));
-+  });
++  audioSection->addLayout(makeSliderRow(QStringLiteral("Volume:"),
++                                        m_volumeSlider, m_volumeValue, 0, 100));
++  connect(m_volumeSlider, &QSlider::valueChanged, this,
++          [this](int value) { m_volumeValue->setText(percentText(value)); });
 +
 +  m_testOutput = new QAudioOutput(this);
 +  m_testPlayer = new QMediaPlayer(this);
@@ -1341,6 +1712,76 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  return text.isEmpty() ? SelectionFx::defaultMediaFolder() : text;
 +}
 +
++bool SelectionFxPage::isCustomPosition() const {
++  return m_positionCombo->currentData().toInt() == SelectionFx::PositionCustom;
++}
++
++SelectionFx::MediaStyle SelectionFxPage::styleForRow(const MediaRow *row) const {
++  SelectionFx::MediaStyle style;
++  style.sizePercent = (row && row->sizeSpin->value() > 0)
++                          ? row->sizeSpin->value()
++                          : m_sizeSlider->value();
++  style.imageOpacity = m_opacitySlider->value();
++  style.borderEnabled = m_borderCheck->isChecked();
++  style.borderOpacity = m_borderOpacitySlider->value();
++  style.popIntensity = m_popSlider->value();
++
++  if (isCustomPosition()) {
++    if (row && row->hasCustom) {
++      style.custom = true;
++      style.customCenter = QPointF(row->customX, row->customY);
++    } else {
++      style.position = static_cast<OverlayPosition>(m_lastPreset);
++    }
++  } else {
++    style.position =
++        static_cast<OverlayPosition>(m_positionCombo->currentData().toInt());
++  }
++  return style;
++}
++
++QSizeF SelectionFxPage::imageSizeFor(const MediaRow *row) const {
++  if (row) {
++    const QString file = row->imageCombo->currentData().toString();
++    if (!file.isEmpty()) {
++      const QString path = SelectionFx::resolveMediaPath(mediaFolder(), file);
++      if (QFileInfo::exists(path)) {
++        QImageReader reader(path);
++        const QSize size = reader.size();
++        if (size.isValid()) {
++          return QSizeF(size);
++        }
++      }
++    }
++  }
++  return QSizeF(1.0, 1.0);
++}
++
++// Stores where the row's image currently sits (for preset `from`) as a custom
++// position, so switching to Custom doesn't make anything jump.
++void SelectionFxPage::seedCustom(MediaRow *row, OverlayPosition from) {
++  SelectionFx::MediaStyle style = styleForRow(row);
++  style.custom = false;
++  style.position = from;
++
++  const QSizeF container(m_preview->size());
++  const QRectF box = SelectionFx::mediaRect(container, imageSizeFor(row), style);
++  if (box.isEmpty() || container.isEmpty()) {
++    return;
++  }
++  row->customX = qBound(0.0, box.center().x() / container.width(), 1.0);
++  row->customY = qBound(0.0, box.center().y() / container.height(), 1.0);
++  row->hasCustom = true;
++}
++
++void SelectionFxPage::seedCustomPositions() {
++  for (MediaRow *row : std::as_const(m_rows)) {
++    if (!row->hasCustom) {
++      seedCustom(row, static_cast<OverlayPosition>(m_lastPreset));
++    }
++  }
++}
++
 +void SelectionFxPage::populateCombo(QComboBox *combo, const QStringList &filters,
 +                                    const QString &current) {
 +  const QSignalBlocker blocker(combo);
@@ -1367,6 +1808,9 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +MediaRow *SelectionFxPage::addRow(const QString &name,
 +                                  const SelectionFx::CharacterMedia &media) {
 +  auto *row = new MediaRow();
++  row->hasCustom = media.hasCustomPosition;
++  row->customX = media.customX;
++  row->customY = media.customY;
 +
 +  auto *outer = new QHBoxLayout(row);
 +  outer->setContentsMargins(8, 6, 8, 6);
@@ -1392,7 +1836,7 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  row->nameEdit->setAcceptDrops(false); // let file drops reach the row
 +
 +  row->sizeSpin = new QSpinBox();
-+  row->sizeSpin->setRange(0, 100);
++  row->sizeSpin->setRange(0, 500);
 +  row->sizeSpin->setSuffix(QStringLiteral("%"));
 +  row->sizeSpin->setSpecialValueText(QStringLiteral("Default"));
 +  row->sizeSpin->setValue(media.sizePercent);
@@ -1569,7 +2013,7 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +void SelectionFxPage::updatePreview() {
 +  updateAspect();
 +
-+  int percent = m_sizeSlider->value();
++  const SelectionFx::MediaStyle style = styleForRow(m_selectedRow);
 +  QString path;
 +  QString caption =
 +      QStringLiteral("Select a character below to preview its image.");
@@ -1577,20 +2021,17 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  if (m_selectedRow) {
 +    const QString file = m_selectedRow->imageCombo->currentData().toString();
 +    path = SelectionFx::resolveMediaPath(mediaFolder(), file);
-+    if (m_selectedRow->sizeSpin->value() > 0) {
-+      percent = m_selectedRow->sizeSpin->value();
-+    }
 +    const QString name = m_selectedRow->nameEdit->text().trimmed();
-+    caption = QStringLiteral("Previewing %1 on a %2 x %3 px window at %4%.")
-+                  .arg(name.isEmpty() ? QStringLiteral("(unnamed)") : name)
-+                  .arg(Config::instance().thumbnailWidth())
-+                  .arg(Config::instance().thumbnailHeight())
-+                  .arg(percent);
++    caption =
++        QStringLiteral("Previewing %1 on a %2 x %3 px window at %4%. Drag the "
++                       "image to place it; anything past the edge is cropped.")
++            .arg(name.isEmpty() ? QStringLiteral("(unnamed)") : name)
++            .arg(Config::instance().thumbnailWidth())
++            .arg(Config::instance().thumbnailHeight())
++            .arg(style.sizePercent);
 +  }
 +
-+  m_preview->setLayoutOptions(
-+      percent,
-+      static_cast<OverlayPosition>(m_positionCombo->currentData().toInt()));
++  m_preview->setStyleOptions(style);
 +  m_preview->setMedia(path);
 +  m_previewCaption->setText(caption);
 +}
@@ -1723,16 +2164,29 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +
 +  clearRows();
 +
++  m_lastPreset = (fx.position == SelectionFx::PositionCustom)
++                     ? static_cast<int>(OverlayPosition::BottomLeft)
++                     : fx.position;
++
 +  m_folderEdit->setText(fx.mediaFolder);
 +  m_onlyOnChangeCheck->setChecked(fx.onlyOnChange);
 +  m_imageCheck->setChecked(fx.imageEnabled);
 +  m_sizeSlider->setValue(fx.sizePercent);
-+  m_sizeValue->setText(QStringLiteral("%1%").arg(fx.sizePercent));
-+  m_positionCombo->setCurrentIndex(qBound(0, fx.position, 8));
-+  m_animateCheck->setChecked(fx.animationEnabled);
++  m_sizeValue->setText(percentText(fx.sizePercent));
++  m_positionCombo->setCurrentIndex(
++      qMax(0, m_positionCombo->findData(fx.position)));
++  m_opacitySlider->setValue(fx.imageOpacity);
++  m_opacityValue->setText(percentText(fx.imageOpacity));
++  m_borderCheck->setChecked(fx.borderEnabled);
++  m_borderOpacitySlider->setValue(fx.borderOpacity);
++  m_borderOpacityValue->setText(percentText(fx.borderOpacity));
++  m_borderOpacitySlider->setEnabled(fx.borderEnabled);
++  m_popSlider->setValue(fx.popIntensity);
++  m_popValue->setText(fx.popIntensity == 0 ? QStringLiteral("Off")
++                                           : percentText(fx.popIntensity));
 +  m_audioCheck->setChecked(fx.audioEnabled);
 +  m_volumeSlider->setValue(fx.volume);
-+  m_volumeValue->setText(QStringLiteral("%1%").arg(fx.volume));
++  m_volumeValue->setText(percentText(fx.volume));
 +
 +  QStringList names = SelectionFx::configuredCharacters();
 +  names.sort(Qt::CaseInsensitive);
@@ -1749,7 +2203,10 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +  fx.imageEnabled = m_imageCheck->isChecked();
 +  fx.sizePercent = m_sizeSlider->value();
 +  fx.position = m_positionCombo->currentData().toInt();
-+  fx.animationEnabled = m_animateCheck->isChecked();
++  fx.imageOpacity = m_opacitySlider->value();
++  fx.borderEnabled = m_borderCheck->isChecked();
++  fx.borderOpacity = m_borderOpacitySlider->value();
++  fx.popIntensity = m_popSlider->value();
 +  fx.audioEnabled = m_audioCheck->isChecked();
 +  fx.volume = m_volumeSlider->value();
 +  fx.save();
@@ -1769,6 +2226,9 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +    media.image = row->imageCombo->currentData().toString();
 +    media.audio = row->audioCombo->currentData().toString();
 +    media.sizePercent = row->sizeSpin->value();
++    media.hasCustomPosition = row->hasCustom;
++    media.customX = row->customX;
++    media.customY = row->customY;
 +    if (!media.isEmpty()) {
 +      SelectionFx::setCharacterMedia(name, media);
 +    }
@@ -1776,7 +2236,7 @@ diff -ruN a/src/selectionfxpage.cpp b2/src/selectionfxpage.cpp
 +}
 diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 --- a/src/thumbnailwidget.cpp	2026-10-15 14:26:00.204011479 +0000
-+++ b2/src/thumbnailwidget.cpp	2026-10-15 17:14:57.591831294 +0000
++++ b2/src/thumbnailwidget.cpp	2026-10-16 00:18:47.020655324 +0000
 @@ -1,5 +1,6 @@
  #include "thumbnailwidget.h"
  #include "config.h"
@@ -1803,7 +2263,7 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
  }
  
  void ThumbnailWidget::updateOverlayWidget() {
-@@ -264,6 +270,48 @@
+@@ -264,6 +270,43 @@
    }
  }
  
@@ -1813,17 +2273,13 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 +  }
 +
 +  const SelectionFx::Settings fx = SelectionFx::Settings::load();
++  SelectionFx::CharacterMedia media;
 +  QString path;
-+  int percent = fx.sizePercent;
 +
 +  if (fx.imageEnabled && !m_characterName.isEmpty()) {
-+    const SelectionFx::CharacterMedia media =
-+        SelectionFx::characterMedia(m_characterName);
++    media = SelectionFx::characterMedia(m_characterName);
 +    if (!media.image.isEmpty()) {
 +      path = SelectionFx::resolveMediaPath(fx.mediaFolder, media.image);
-+    }
-+    if (media.sizePercent > 0) {
-+      percent = media.sizePercent;
 +    }
 +  }
 +
@@ -1832,8 +2288,7 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 +    return;
 +  }
 +
-+  m_overlayWidget->setMediaStyle(static_cast<OverlayPosition>(fx.position),
-+                                 percent, fx.animationEnabled);
++  m_overlayWidget->setMediaStyle(fx.styleFor(media));
 +  m_overlayWidget->setMedia(path);
 +}
 +
@@ -1852,7 +2307,7 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
  QPoint ThumbnailWidget::snapPosition(
      const QPoint &pos, const QVector<ThumbnailWidget *> &otherThumbnails) {
    const Config &cfg = Config::instance();
-@@ -1099,11 +1147,300 @@
+@@ -1099,11 +1142,239 @@
    }
  }
  
@@ -1862,12 +2317,9 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 +
 +namespace {
 +constexpr int MEDIA_MAX_DIM = 512;
-+constexpr int MEDIA_MARGIN = 8;
 +constexpr int SELECT_ANIM_MS = 450;
-+constexpr int SPEAK_ANIM_MS = 700;
 +constexpr int SPEAK_GUARD_MS = 15000; // safety net if "stopped" never arrives
 +constexpr int GIF_MIN_PLAY_MS = 2500; // how long a GIF plays with no audio
-+constexpr qreal TWO_PI = 6.28318530717958647692;
 +} // namespace
 +
 +void OverlayWidget::setMedia(const QString &path) {
@@ -1924,15 +2376,11 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 +  update();
 +}
 +
-+void OverlayWidget::setMediaStyle(OverlayPosition position, int sizePercent,
-+                                  bool animate) {
-+  if (m_mediaPosition == position && m_mediaSizePercent == sizePercent &&
-+      m_mediaAnimate == animate) {
++void OverlayWidget::setMediaStyle(const SelectionFx::MediaStyle &style) {
++  if (m_style == style) {
 +    return;
 +  }
-+  m_mediaPosition = position;
-+  m_mediaSizePercent = sizePercent;
-+  m_mediaAnimate = animate;
++  m_style = style;
 +  m_mediaIdleScaledPx = QSize();
 +  update();
 +}
@@ -1973,7 +2421,7 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 +    return;
 +  }
 +
-+  if (m_mediaAnimate) {
++  if (m_style.popIntensity > 0) {
 +    if (!m_selectAnimation) {
 +      m_selectAnimation = new QVariantAnimation(this);
 +      m_selectAnimation->setStartValue(0.0);
@@ -2003,31 +2451,13 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 +    if (m_mediaIdle.isNull() || !isVisible()) {
 +      return;
 +    }
-+
-+    if (!m_speakAnimation) {
-+      m_speakAnimation = new QVariantAnimation(this);
-+      m_speakAnimation->setStartValue(0.0);
-+      m_speakAnimation->setEndValue(TWO_PI);
-+      m_speakAnimation->setDuration(SPEAK_ANIM_MS);
-+      m_speakAnimation->setLoopCount(-1);
-+      m_speakAnimation->setEasingCurve(QEasingCurve::Linear);
-+      connect(m_speakAnimation, &QVariantAnimation::valueChanged, this,
-+              [this](const QVariant &value) {
-+                m_speakPhase = value.toReal();
-+                update();
-+              });
-+    }
 +    if (!m_speakGuardTimer) {
 +      m_speakGuardTimer = new QTimer(this);
 +      m_speakGuardTimer->setSingleShot(true);
 +      connect(m_speakGuardTimer, &QTimer::timeout, this,
 +              [this]() { setSpeaking(false); });
 +    }
-+
 +    m_speaking = true;
-+    if (m_speakAnimation->state() != QAbstractAnimation::Running) {
-+      m_speakAnimation->start();
-+    }
 +    m_speakGuardTimer->start(SPEAK_GUARD_MS);
 +    beginMediaPlayback(0);
 +  } else {
@@ -2035,14 +2465,10 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 +      return;
 +    }
 +    m_speaking = false;
-+    if (m_speakAnimation) {
-+      m_speakAnimation->stop();
-+    }
 +    if (m_speakGuardTimer) {
 +      m_speakGuardTimer->stop();
 +    }
 +    maybeStopMovie();
-+    update();
 +  }
 +}
 +
@@ -2059,9 +2485,6 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 +    m_selectAnimation->stop();
 +  }
 +  m_selectProgress = 1.0;
-+  if (m_speakAnimation) {
-+    m_speakAnimation->stop();
-+  }
 +  if (m_speakGuardTimer) {
 +    m_speakGuardTimer->stop();
 +  }
@@ -2074,73 +2497,44 @@ diff -ruN a/src/thumbnailwidget.cpp b2/src/thumbnailwidget.cpp
 +  }
 +
 +  // Same layout function the settings preview uses, so what you see there is
-+  // what you get here.
-+  const QRectF box =
-+      SelectionFx::imageRect(QSizeF(size()), QSizeF(m_mediaIdle.size()),
-+                             m_mediaSizePercent, m_mediaPosition, MEDIA_MARGIN);
-+  if (box.width() < 8.0 || box.height() < 8.0) {
++  // what you get here. The box may be larger than the window; the window edge
++  // crops whatever sticks out.
++  const QRectF box = SelectionFx::mediaRect(
++      QSizeF(size()), QSizeF(m_mediaIdle.size()), m_style);
++  if (box.width() < 2.0 || box.height() < 2.0) {
 +    return;
 +  }
 +
 +  const qreal dpr = devicePixelRatioF();
-+  QPixmap movieFrame;
++  QPixmap frame;
 +  if (m_movie && m_movie->state() == QMovie::Running) {
-+    movieFrame = m_movie->currentPixmap();
++    frame = m_movie->currentPixmap();
 +  }
-+
-+  // Selection animation: quick pop that settles, fading in, plus an
-+  // expanding ring. t == 1.0 when idle.
-+  const qreal t = m_mediaAnimate ? qBound(0.0, m_selectProgress, 1.0) : 1.0;
-+  const qreal settle = 1.0 - t;
-+  const qreal scale = 1.0 + 0.22 * settle * settle;
-+  const QColor accent = Config::instance().highlightColor();
-+
-+  painter.save();
-+  painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-+  painter.translate(box.center());
-+  painter.scale(scale, scale);
-+  painter.translate(-box.center());
-+  painter.setOpacity(0.35 + 0.65 * t);
-+
-+  QPainterPath plate;
-+  plate.addRoundedRect(box, 6, 6);
-+  painter.fillPath(plate, QColor(10, 14, 20, 110));
-+
-+  if (!movieFrame.isNull()) {
-+    painter.drawPixmap(box, movieFrame, QRectF(movieFrame.rect()));
-+  } else {
-+    // Scale the still image once per size, not on every repaint.
++  if (frame.isNull()) {
++    // Scale the still image once per size (not on every repaint), unless it is
++    // so large (image bigger than the window) that caching would waste memory.
 +    const QSize px(qMax(1, qRound(box.width() * dpr)),
 +                   qMax(1, qRound(box.height() * dpr)));
-+    if (m_mediaIdleScaledPx != px || m_mediaIdleScaled.isNull()) {
-+      m_mediaIdleScaled = m_mediaIdle.scaled(px, Qt::IgnoreAspectRatio,
-+                                             Qt::SmoothTransformation);
-+      m_mediaIdleScaled.setDevicePixelRatio(dpr);
-+      m_mediaIdleScaledPx = px;
++    const bool cacheable = px.width() <= qRound(2.0 * width() * dpr) &&
++                           px.height() <= qRound(2.0 * height() * dpr);
++    if (cacheable) {
++      if (m_mediaIdleScaledPx != px || m_mediaIdleScaled.isNull()) {
++        m_mediaIdleScaled = m_mediaIdle.scaled(px, Qt::IgnoreAspectRatio,
++                                               Qt::SmoothTransformation);
++        m_mediaIdleScaled.setDevicePixelRatio(dpr);
++        m_mediaIdleScaledPx = px;
++      }
++      frame = m_mediaIdleScaled;
++    } else {
++      frame = m_mediaIdle;
 +    }
-+    painter.drawPixmap(box.topLeft(), m_mediaIdleScaled);
 +  }
 +
-+  painter.setBrush(Qt::NoBrush);
-+  painter.setPen(QPen(accent, 1.5));
-+  painter.drawRoundedRect(box, 6, 6);
-+
-+  if (settle > 0.0) {
-+    QColor ring = accent;
-+    ring.setAlpha(int(200.0 * settle));
-+    painter.setPen(QPen(ring, 2.0));
-+    const qreal grow = 14.0 * t;
-+    painter.drawRoundedRect(box.adjusted(-grow, -grow, grow, grow), 8, 8);
-+  }
-+
-+  if (m_speaking) {
-+    const qreal pulse = 0.5 + 0.5 * std::sin(m_speakPhase);
-+    QColor glow = accent;
-+    glow.setAlpha(int(90.0 + 140.0 * pulse));
-+    painter.setPen(QPen(glow, 2.0 + 1.5 * pulse));
-+    painter.drawRoundedRect(box.adjusted(-2, -2, 2, 2), 8, 8);
-+  }
-+
++  const qreal progress = m_style.popIntensity > 0 ? m_selectProgress : 1.0;
++  painter.save();
++  painter.setClipRect(rect()); // crop anything beyond the window edges
++  SelectionFx::paintMedia(painter, box, frame, m_style,
++                          Config::instance().highlightColor(), progress);
 +  painter.restore();
 +}
 +
